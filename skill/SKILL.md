@@ -106,7 +106,7 @@ Only `query` is required. All other fields fall back to plugin config defaults.
 The plugin auto-installs `luckee-cli` via pip when `autoInstallCli` is true (default). If that fails:
 
 ```bash
-pip install --upgrade luckee-cli
+pip install --upgrade 'luckee-cli>=0.1.2026031307,<0.2.0'
 openclaw gateway restart
 ```
 

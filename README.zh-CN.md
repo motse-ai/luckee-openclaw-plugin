@@ -23,7 +23,7 @@ skill/        ClawHub 技能（SKILL.md + reference.md，供 AI 代理使用）
 ## 前置条件
 
 - [OpenClaw](https://openclaw.ai) 网关正在运行
-- Python 3.8+（用于 `luckee-cli` 后端）
+- Python 3.10+（用于 [`luckee-cli`](https://pypi.org/project/luckee-cli/) 后端）
 - Node.js 18+
 
 ## 安装
@@ -31,7 +31,7 @@ skill/        ClawHub 技能（SKILL.md + reference.md，供 AI 代理使用）
 ### 1. 安装 luckee CLI
 
 ```bash
-pip install --upgrade luckee-cli
+pip install --upgrade 'luckee-cli>=0.1.2026031307,<0.2.0'
 ```
 
 ### 2. 将插件注册到 OpenClaw

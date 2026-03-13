@@ -23,7 +23,7 @@ skill/        ClawHub skill (SKILL.md + reference.md for AI agents)
 ## Prerequisites
 
 - [OpenClaw](https://openclaw.ai) gateway running
-- Python 3.8+ (for the `luckee-cli` backend)
+- Python 3.10+ (for the [`luckee-cli`](https://pypi.org/project/luckee-cli/) backend)
 - Node.js 18+
 
 ## Installation
@@ -31,7 +31,7 @@ skill/        ClawHub skill (SKILL.md + reference.md for AI agents)
 ### 1. Install the luckee CLI
 
 ```bash
-pip install --upgrade luckee-cli
+pip install --upgrade 'luckee-cli>=0.1.2026031307,<0.2.0'
 ```
 
 ### 2. Register the plugin with OpenClaw

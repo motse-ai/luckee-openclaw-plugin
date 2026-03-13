@@ -105,7 +105,7 @@ For each candidate, the plugin runs `<binary> --version` and checks:
 If all candidates fail and `autoInstallCli` is true (default), the plugin attempts:
 
 ```bash
-<python> -m pip install --upgrade luckee-cli
+<python> -m pip install --upgrade 'luckee-cli>=0.1.2026031307,<0.2.0'
 ```
 
 Python candidates tried: `config.pythonPath` (if set), then `python3`, `python`, `py`.
@@ -141,8 +141,8 @@ If the native update fails, the plugin falls back to sending a new message and d
 |-------|-------|----------|
 | `Missing query.` | Tool called without `query` parameter | Provide a non-empty `query` string |
 | `Missing required values. Need defaultUrl/userId/lingxingAccount` | One or more required config keys not set | Set all three required keys via `openclaw config set` |
-| `luckee CLI is required but was not found` | No luckee binary found and auto-install failed | Run `pip install --upgrade luckee-cli` manually, or set `binaryPath` |
+| `luckee CLI is required but was not found` | No luckee binary found and auto-install failed | Run `pip install --upgrade 'luckee-cli>=0.1.2026031307,<0.2.0'` manually, or set `binaryPath` |
 | `luckee exited with code <N>` | CLI returned non-zero exit | Check stderr in the error message; common causes: invalid token, network timeout, bad query |
 | `Ignored caller-provided url; enforced defaultUrl` | Caller tried to override the API URL | This is expected security behavior; the URL always comes from plugin config |
 | `plugin id mismatch (manifest uses "luckee-tool", entry hints "luckee-openclaw-plugin")` | Config key doesn't match the plugin manifest ID | Run `openclaw config unset plugins.entries.luckee-openclaw-plugin` and re-register |
-| `auto-install failed: tried python executables` | pip install couldn't find a working Python | Install Python 3.8+ and ensure `python3` is on PATH, or set `pythonPath` |
+| `auto-install failed: tried python executables` | pip install couldn't find a working Python | Install Python 3.10+ and ensure `python3` is on PATH, or set `pythonPath` |

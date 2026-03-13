@@ -4,6 +4,13 @@
   "version": "0.1.0",
   "description": "Expose luckee CLI as an OpenClaw tool and chat command for querying Lingxing data",
   "repository": "https://github.com/motse-ai/luckee-openclaw-plugin",
+  "requires": {
+    "bins": ["luckee-cli"],
+    "python": ">=3.10",
+    "pip": {
+      "luckee-cli": ">=0.1.2026031307,<0.2.0"
+    }
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

@@ -19,9 +19,11 @@ type LuckeeConfig = {
   pythonPath?: string;
 };
 
+const LUCKEE_CLI_PIP_SPEC = "luckee-cli>=0.1.2026031307,<0.2.0";
+
 const CLI_INSTALL_GUIDE =
   "luckee CLI is required but was not found.\n" +
-  "Install it with: python -m pip install --upgrade luckee-cli\n" +
+  `Install it with: python -m pip install --upgrade '${LUCKEE_CLI_PIP_SPEC}'\n` +
   "Then restart OpenClaw. If your executable name differs, set plugins.entries[\"luckee-tool\"].config.binaryPath.";
 
 const PUSH_CAPABLE_CHANNELS = new Set([
@@ -438,7 +440,7 @@ async function attemptLuckeeCliInstall(
   const pythonCandidates = cfg.pythonPath
     ? [cfg.pythonPath]
     : ["python3", "python", "py"];
-  const pipArgs = ["-m", "pip", "install", "--upgrade", "luckee-cli"];
+  const pipArgs = ["-m", "pip", "install", "--upgrade", LUCKEE_CLI_PIP_SPEC];
 
   for (const py of pythonCandidates) {
     try {
