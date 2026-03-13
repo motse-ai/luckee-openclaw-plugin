@@ -1,5 +1,7 @@
 # Luckee OpenClaw Plugin
 
+[English](./README.md) | [中文](./README.zh-CN.md)
+
 An [OpenClaw](https://openclaw.ai) plugin that exposes the **luckee CLI** as an AI-callable tool and chat command. It lets AI assistants query Lingxing data through any OpenClaw-connected channel (Telegram, WhatsApp, Discord, Feishu, Slack, and more).
 
 ## Features
