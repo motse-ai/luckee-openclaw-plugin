@@ -4,6 +4,13 @@
 
 An [OpenClaw](https://openclaw.ai) plugin that exposes the **luckee CLI** as an AI-callable tool and chat command. It lets AI assistants query Lingxing data through any OpenClaw-connected channel (Telegram, WhatsApp, Discord, Feishu, Slack, and more).
 
+## Repo Structure
+
+```
+plugin/       OpenClaw plugin source (index.ts, config, dependencies)
+skill/        ClawHub skill (SKILL.md + reference.md for AI agents)
+```
+
 ## Features
 
 - **`luckee_query` tool** — AI agents can call Lingxing queries programmatically.
@@ -30,8 +37,9 @@ pip install --upgrade luckee-cli
 ### 2. Register the plugin with OpenClaw
 
 ```bash
-openclaw plugins add /path/to/luckee-openclaw-plugin
-openclaw plugins enable luckee-tool
+git clone https://github.com/motse-ai/luckee-openclaw-plugin.git
+cd luckee-openclaw-plugin/plugin && npm install
+openclaw plugins install ./luckee-openclaw-plugin/plugin
 ```
 
 ### 3. Configure required settings
@@ -46,6 +54,14 @@ Then restart the gateway:
 
 ```bash
 openclaw gateway restart
+```
+
+### Install via ClawHub Skill (Alternative)
+
+If you have ClawHub, install the skill and let the AI agent handle setup:
+
+```bash
+clawhub install luckee-skill
 ```
 
 ## Configuration

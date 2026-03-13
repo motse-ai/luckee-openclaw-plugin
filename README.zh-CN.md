@@ -4,6 +4,13 @@
 
 一个 [OpenClaw](https://openclaw.ai) 插件，将 **luckee CLI** 封装为 AI 可调用的工具和聊天命令。AI 助手可以通过 OpenClaw 连接的任意渠道（Telegram、WhatsApp、Discord、飞书、Slack 等）查询领星数据。
 
+## 仓库结构
+
+```
+plugin/       OpenClaw 插件源码（index.ts、配置、依赖）
+skill/        ClawHub 技能（SKILL.md + reference.md，供 AI 代理使用）
+```
+
 ## 功能特性
 
 - **`luckee_query` 工具** — AI 代理可以通过编程方式调用领星查询。
@@ -30,8 +37,9 @@ pip install --upgrade luckee-cli
 ### 2. 将插件注册到 OpenClaw
 
 ```bash
-openclaw plugins add /path/to/luckee-openclaw-plugin
-openclaw plugins enable luckee-tool
+git clone https://github.com/motse-ai/luckee-openclaw-plugin.git
+cd luckee-openclaw-plugin/plugin && npm install
+openclaw plugins install ./luckee-openclaw-plugin/plugin
 ```
 
 ### 3. 配置必填项
@@ -46,6 +54,14 @@ openclaw config set plugins.entries.luckee-tool.config.defaultLingxingAccount "<
 
 ```bash
 openclaw gateway restart
+```
+
+### 通过 ClawHub 技能安装（替代方式）
+
+如果你已安装 ClawHub，可以安装技能并让 AI 代理自动完成设置：
+
+```bash
+clawhub install luckee-skill
 ```
 
 ## 配置项

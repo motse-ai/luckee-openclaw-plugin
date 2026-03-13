@@ -11,6 +11,5 @@ tokens.json
 .DS_Store
 Thumbs.db
 
-# IDE (keep .cursor/skills/ for shared skills)
-.cursor/*
-!.cursor/skills/
+# IDE
+.cursor/
