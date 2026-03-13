@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.tgz
+
+# Secrets / tokens
+tokens.json
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE (keep .cursor/skills/ for shared skills)
+.cursor/*
+!.cursor/skills/

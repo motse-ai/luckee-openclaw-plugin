@@ -1,0 +1,62 @@
+{
+  "id": "luckee-tool",
+  "name": "Luckee Tool",
+  "version": "0.1.0",
+  "description": "Expose luckee CLI as an OpenClaw tool and chat command for querying Lingxing data",
+  "repository": "https://github.com/motse-ai/luckee-openclaw-plugin",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "binaryPath": {
+        "type": "string",
+        "default": "luckee-cli",
+        "description": "Path to the luckee CLI binary"
+      },
+      "defaultUrl": {
+        "type": "string",
+        "description": "API endpoint URL (required)"
+      },
+      "defaultUserId": {
+        "type": "string",
+        "description": "Default user ID for queries (required)"
+      },
+      "defaultLanguage": {
+        "type": "string",
+        "default": "CN",
+        "description": "Query language code"
+      },
+      "defaultLingxingAccount": {
+        "type": "string",
+        "description": "Lingxing account identifier (required)"
+      },
+      "defaultToken": {
+        "type": "string",
+        "description": "Default API authentication token"
+      },
+      "tokenStorePath": {
+        "type": "string",
+        "description": "Path to the persisted token store file"
+      },
+      "defaultTimeout": {
+        "type": "number",
+        "default": 90,
+        "description": "Query timeout in seconds"
+      },
+      "streamFlushMs": {
+        "type": "number",
+        "default": 500,
+        "description": "Interval in milliseconds between streaming progress flushes"
+      },
+      "autoInstallCli": {
+        "type": "boolean",
+        "default": true,
+        "description": "Automatically install luckee-cli via pip if the binary is not found"
+      },
+      "pythonPath": {
+        "type": "string",
+        "description": "Python executable used for auto-installing luckee-cli"
+      }
+    }
+  }
+}
