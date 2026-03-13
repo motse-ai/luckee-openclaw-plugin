@@ -109,3 +109,7 @@ AI agents connected to OpenClaw can call the `luckee_query` tool with:
 ## License
 
 MIT
+
+---
+
+Developed by [Motse AI](https://motse.ai)

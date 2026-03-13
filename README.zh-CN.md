@@ -109,3 +109,7 @@ openclaw gateway restart
 ## 许可证
 
 MIT
+
+---
+
+由 [Motse AI](https://motse.ai) 开发
