@@ -7,10 +7,10 @@ All settings live under `plugins.entries["luckee-tool"].config` in `~/.openclaw/
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
 | `binaryPath` | string | `luckee-cli` | No | Path to the luckee CLI binary |
-| `defaultUrl` | string | — | **Yes** | API endpoint URL |
-| `defaultUserId` | string | — | **Yes** | Default user ID for queries |
+| `defaultUrl` | string | — | No | Legacy/advanced API endpoint override (normally not needed) |
+| `defaultUserId` | string | — | No | Legacy/advanced default user ID (normally not needed) |
 | `defaultLanguage` | string | `CN` | No | Query language code |
-| `defaultLingxingAccount` | string | — | **Yes** | Lingxing account identifier |
+| `defaultLingxingAccount` | string | — | No | Legacy/advanced Lingxing account identifier (normally not needed) |
 | `defaultToken` | string | — | No | Default API authentication token |
 | `tokenStorePath` | string | `~/.openclaw/secrets/luckee-tool/tokens.json` | No | Path to the persisted token store file |
 | `defaultTimeout` | number | `90` | No | Query timeout in seconds |
@@ -29,9 +29,6 @@ All settings live under `plugins.entries["luckee-tool"].config` in `~/.openclaw/
         "enabled": true,
         "config": {
           "binaryPath": "luckee-cli",
-          "defaultUrl": "https://api.example.com/v1",
-          "defaultUserId": "user_abc123",
-          "defaultLingxingAccount": "my_account",
           "defaultLanguage": "CN",
           "defaultToken": "sk_live_xxxx",
           "defaultTimeout": 90,
@@ -112,6 +109,12 @@ Python candidates tried: `config.pythonPath` (if set), then `python3`, `python`,
 
 After auto-install, the binary probe runs again. Results are cached per configuration for the lifetime of the gateway process.
 
+## Authentication Behavior
+
+- `luckee login` starts browser-based authorization explicitly.
+- Running normal `luckee` commands also checks session status and prompts browser authorization automatically when not logged in.
+- During support flows, do not ask users for API URL, User ID, or Lingxing account credentials.
+
 ## Feishu Card Native Updates
 
 When the channel is `feishu` and the plugin has a `messageId` from a previous send, it attempts in-place card updates via:
@@ -140,9 +143,9 @@ If the native update fails, the plugin falls back to sending a new message and d
 | Error | Cause | Solution |
 |-------|-------|----------|
 | `Missing query.` | Tool called without `query` parameter | Provide a non-empty `query` string |
-| `Missing required values. Need defaultUrl/userId/lingxingAccount` | One or more required config keys not set | Set all three required keys via `openclaw config set` |
+| `Not logged in` / auth-related error | Local Luckee session is missing or expired | Run `luckee login` (or rerun a normal `luckee` command to trigger auto-login), complete browser authorization, then retry |
 | `luckee CLI is required but was not found` | No luckee binary found and auto-install failed | Run `pip install --upgrade 'luckee-cli>=0.1.2026031307,<0.2.0'` manually, or set `binaryPath` |
 | `luckee exited with code <N>` | CLI returned non-zero exit | Check stderr in the error message; common causes: invalid token, network timeout, bad query |
-| `Ignored caller-provided url; enforced defaultUrl` | Caller tried to override the API URL | This is expected security behavior; the URL always comes from plugin config |
+| Auth expired during runtime | Login session timed out | Re-run `luckee login` and retry the query |
 | `plugin id mismatch (manifest uses "luckee-tool", entry hints "luckee-openclaw-plugin")` | Config key doesn't match the plugin manifest ID | Run `openclaw config unset plugins.entries.luckee-openclaw-plugin` and re-register |
 | `auto-install failed: tried python executables` | pip install couldn't find a working Python | Install Python 3.10+ and ensure `python3` is on PATH, or set `pythonPath` |

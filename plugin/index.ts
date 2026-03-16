@@ -250,22 +250,28 @@ async function runCommandDetailed(
 }
 
 function splitChunks(text: string, maxLen = 900): string[] {
-  const lines = text.split(/\r?\n/);
+  if (!text) return [];
+  if (text.length <= maxLen) return [text];
   const chunks: string[] = [];
-  let buf = "";
-
-  for (const line of lines) {
-    if (!line) continue;
-    const candidate = buf ? `${buf}\n${line}` : line;
-    if (candidate.length <= maxLen) {
-      buf = candidate;
-      continue;
-    }
-    if (buf) chunks.push(buf);
-    buf = line.length <= maxLen ? line : line.slice(0, maxLen);
+  for (let i = 0; i < text.length; i += maxLen) {
+    chunks.push(text.slice(i, i + maxLen));
   }
-  if (buf) chunks.push(buf);
   return chunks;
+}
+
+function normalizeWrappedUrls(text: string): string {
+  if (!text) return text;
+  // Some render paths may insert hard line-breaks inside long URLs.
+  // Re-join newline boundaries when both sides look URL-safe.
+  let out = text;
+  const wrappedUrlBoundary =
+    /((?:https?:\/\/)[^\s\n]+)\n(?=[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%])/g;
+  for (let i = 0; i < 10; i++) {
+    const next = out.replace(wrappedUrlBoundary, "$1");
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }
 
 function withProgressFooter(text: string, tick: number): string {
@@ -665,6 +671,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 function buildFeishuCard(text: string): Record<string, any> {
+  const markdownSafeText = text.replace(
+    /(https?:\/\/[^\s<>"`]+)/g,
+    (_m, url: string) => `[Open URL](${url})`
+  );
   return {
     schema: "2.0",
     config: {
@@ -674,7 +684,7 @@ function buildFeishuCard(text: string): Record<string, any> {
       elements: [
         {
           tag: "markdown",
-          content: `**Luckee 流式输出**\n\n${text}`,
+          content: `**Luckee 流式输出**\n\n${markdownSafeText}`,
         },
       ],
     },
@@ -960,14 +970,17 @@ export default function register(api: any) {
 
         const pushProgress = async (chunk?: string) => {
           if (chunk) {
-            accumulated = accumulated ? `${accumulated}\n${chunk}` : chunk;
+            accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
             if (accumulated.length > 3500) {
               accumulated = `...(truncated old output)\n${accumulated.slice(-3200)}`;
             }
           }
           if (!accumulated) return;
 
-          const progressText = withProgressFooter(accumulated, loadingTick);
+          const progressText = withProgressFooter(
+            normalizeWrappedUrls(accumulated),
+            loadingTick
+          );
           loadingTick += 1;
 
           const edited = await sendProgressMessageEditable(
@@ -996,7 +1009,9 @@ export default function register(api: any) {
 
         if (streamed) {
           if (progressMessageId) {
-            const finalText = withDoneFooter(output.length > 3500 ? output.slice(-3500) : output);
+            const finalText = withDoneFooter(
+              normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)
+            );
             await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
           }
           api.logger?.info?.(

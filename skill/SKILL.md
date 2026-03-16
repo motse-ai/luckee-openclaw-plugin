@@ -35,15 +35,16 @@ cd /tmp/luckee-openclaw-plugin/plugin && npm install
 openclaw plugins install /tmp/luckee-openclaw-plugin/plugin
 ```
 
-### 4. Configure required settings
+### 4. Authenticate with Luckee
 
-Ask the user for these three values, then set them:
+Run:
 
 ```bash
-openclaw config set plugins.entries.luckee-tool.config.defaultUrl "<api-url>"
-openclaw config set plugins.entries.luckee-tool.config.defaultUserId "<user-id>"
-openclaw config set plugins.entries.luckee-tool.config.defaultLingxingAccount "<account>"
+luckee login
 ```
+
+This command opens a browser auth page. Ask the user to complete authorization in the web page, then continue in terminal once login finishes.
+Running regular `luckee` commands also checks login status and will prompt the same web authorization flow if the user is not logged in.
 
 ### 5. Restart and verify
 
@@ -53,7 +54,7 @@ openclaw plugins info luckee-tool
 openclaw health
 ```
 
-Confirm the plugin shows as loaded and the gateway is healthy.
+Confirm the plugin shows as loaded and the gateway is healthy. Do not ask the user for API URL, User ID, or Lingxing account details.
 
 ## Usage
 
@@ -90,7 +91,7 @@ Call the `luckee_query` tool with:
 }
 ```
 
-Only `query` is required. All other fields fall back to plugin config defaults.
+Only `query` is required. Auth context is handled by CLI/session state (via `luckee login` or the auto-login prompt when running `luckee` commands).
 
 ## Token Management
 
@@ -116,15 +117,16 @@ Or set the path explicitly:
 openclaw config set plugins.entries.luckee-tool.config.binaryPath "/path/to/luckee-cli"
 ```
 
-### Missing config keys
+### Not logged in / auth expired
 
-If queries fail with "Missing required values", check all three required keys are set:
+If queries fail with auth/login errors, re-run:
 
 ```bash
-openclaw config get plugins.entries.luckee-tool.config.defaultUrl
-openclaw config get plugins.entries.luckee-tool.config.defaultUserId
-openclaw config get plugins.entries.luckee-tool.config.defaultLingxingAccount
+luckee login
 ```
+
+Then retry the query.
+You can also retry with a normal `luckee` command; if not logged in, Luckee will prompt for web authorization automatically.
 
 ### Timeout
 
@@ -148,7 +150,7 @@ openclaw gateway restart
 - **Never** log or display full tokens. Always redact to `sk_x***xx` format.
 - All install/config operations are idempotent — safe to re-run.
 - Do **not** overwrite unrelated config keys when setting luckee-tool config.
-- The plugin enforces `defaultUrl` from config — callers cannot override the API endpoint.
+- Never request API URL, User ID, or Lingxing account credentials from users during normal setup/query flows.
 
 ## Reference
 

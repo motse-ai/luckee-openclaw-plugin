@@ -1,0 +1,73 @@
+name: Publish to ClawHub
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-clawhub-main
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Resolve release version
+        id: version
+        run: |
+          VERSION="$(node -p "require('./plugin/openclaw.plugin.json').version")"
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Check if version tag already exists
+        id: tag_check
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip duplicate publish
+        if: steps.tag_check.outputs.exists == 'true'
+        run: |
+          echo "Tag ${{ steps.version.outputs.tag }} already exists."
+          echo "Skipping ClawHub publish and tag creation."
+
+      - name: Login to ClawHub
+        if: steps.tag_check.outputs.exists == 'false'
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+        run: |
+          if [ -z "$CLAWHUB_TOKEN" ]; then
+            echo "Missing required secret: CLAWHUB_TOKEN" >&2
+            exit 1
+          fi
+          npx -y clawhub login --token "$CLAWHUB_TOKEN" --no-browser
+
+      - name: Publish skill to ClawHub
+        if: steps.tag_check.outputs.exists == 'false'
+        run: |
+          npx -y clawhub publish ./skill --version "${{ steps.version.outputs.version }}" --tags latest
+
+      - name: Create and push git tag
+        if: steps.tag_check.outputs.exists == 'false'
+        run: |
+          git tag -a "${{ steps.version.outputs.tag }}" -m "Release ${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
