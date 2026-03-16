@@ -64,7 +64,20 @@ jobs:
       - name: Publish skill to ClawHub
         if: steps.tag_check.outputs.exists == 'false'
         run: |
-          npx -y clawhub publish ./skill --version "${{ steps.version.outputs.version }}" --tags latest
+          SKILL_SLUG="luckee-skill"
+          npx -y clawhub whoami
+          set +e
+          OUTPUT="$(npx -y clawhub publish ./skill --slug "${SKILL_SLUG}" --name "Luckee Skill" --version "${{ steps.version.outputs.version }}" --tags latest 2>&1)"
+          STATUS=$?
+          set -e
+          echo "${OUTPUT}"
+          if [ ${STATUS} -ne 0 ]; then
+            if echo "${OUTPUT}" | rg -q "Slug is already taken"; then
+              echo "Publish failed: slug '${SKILL_SLUG}' exists but is not updatable by this token." >&2
+              echo "Use a token for the slug owner, or change the slug for a separate skill." >&2
+            fi
+            exit ${STATUS}
+          fi
 
       - name: Create and push git tag
         if: steps.tag_check.outputs.exists == 'false'
