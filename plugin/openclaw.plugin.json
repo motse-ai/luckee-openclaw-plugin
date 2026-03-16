@@ -1,7 +1,7 @@
 {
   "id": "luckee-tool",
   "name": "Luckee Tool",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Expose luckee CLI as an OpenClaw tool and chat command for querying Lingxing data",
   "repository": "https://github.com/motse-ai/luckee-openclaw-plugin",
   "requires": {
