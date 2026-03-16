@@ -17,25 +17,17 @@ If `luckee-tool` appears and shows as enabled, skip straight to **Usage**. Other
 
 ## Install
 
-### 1. Clone the plugin repo
+Before installing, **ask the user for confirmation**: explain that the plugin will be fetched from its GitHub repository and registered with OpenClaw.
+
+### 1. Register the plugin with OpenClaw
 
 ```bash
-git clone https://github.com/motse-ai/luckee-openclaw-plugin.git /tmp/luckee-openclaw-plugin
+openclaw plugins install https://github.com/motse-ai/luckee-openclaw-plugin
 ```
 
-### 2. Install dependencies
+This single command fetches the plugin and installs its dependencies. Do **not** run `git clone` or `npm install` manually.
 
-```bash
-cd /tmp/luckee-openclaw-plugin/plugin && npm install
-```
-
-### 3. Register with OpenClaw
-
-```bash
-openclaw plugins install /tmp/luckee-openclaw-plugin/plugin
-```
-
-### 4. Authenticate with Luckee
+### 2. Authenticate with Luckee
 
 Run:
 
@@ -46,7 +38,7 @@ luckee login
 This command opens a browser auth page. Ask the user to complete authorization in the web page, then continue in terminal once login finishes.
 Running regular `luckee` commands also checks login status and will prompt the same web authorization flow if the user is not logged in.
 
-### 5. Restart and verify
+### 3. Restart and verify
 
 ```bash
 openclaw gateway restart
@@ -95,10 +87,10 @@ Only `query` is required. Auth context is handled by CLI/session state (via `luc
 
 ## Token Management
 
-- Tokens persist at `~/.openclaw/secrets/luckee-tool/tokens.json` (0600 permissions).
-- Per-sender tokens are keyed by SHA-256 hash of `channel|account|sender`.
-- A default token can be set via config: `openclaw config set plugins.entries.luckee-tool.config.defaultToken "<token>"`.
-- Tokens set via `/luckee token` override the config default for that sender and are persisted across restarts.
+- Tokens are managed securely by OpenClaw and persisted across gateway restarts.
+- Set a per-user token via `/luckee token <token>` (overrides the default for that sender).
+- Set a default token via config: `openclaw config set plugins.entries.luckee-tool.config.defaultToken "<token>"`.
+- See [reference.md](reference.md) for advanced token store details.
 
 ## Troubleshooting
 

@@ -66,9 +66,11 @@ The plugin sends real-time streaming progress updates on channels that support p
 - `synology-chat`
 - `tlon`
 
-On Feishu, the plugin uses native card updates via the Feishu Open API (`im/v1/messages/{id}` PATCH) for smoother in-place editing. This requires `channels.feishu.appId` and `channels.feishu.appSecret` to be configured in OpenClaw.
+On Feishu, the plugin uses native card updates via the Feishu Open API (`im/v1/messages/{id}` PATCH) for smoother in-place editing. This is an **optional** feature that only activates when the user has already configured `channels.feishu.appId` and `channels.feishu.appSecret` in OpenClaw. The plugin never prompts for or collects these credentials itself.
 
 ## Token Store Format
+
+> This file is auto-managed by OpenClaw. Do not edit it manually.
 
 Stored at `~/.openclaw/secrets/luckee-tool/tokens.json` with `0600` permissions.
 
@@ -115,7 +117,9 @@ After auto-install, the binary probe runs again. Results are cached per configur
 - Running normal `luckee` commands also checks session status and prompts browser authorization automatically when not logged in.
 - During support flows, do not ask users for API URL, User ID, or Lingxing account credentials.
 
-## Feishu Card Native Updates
+## Feishu Card Native Updates (Optional)
+
+> This feature only activates when the user has already configured Feishu credentials in OpenClaw. The plugin never prompts for or collects `appId`/`appSecret` on its own.
 
 When the channel is `feishu` and the plugin has a `messageId` from a previous send, it attempts in-place card updates via:
 
