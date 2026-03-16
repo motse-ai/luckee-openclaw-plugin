@@ -56,7 +56,7 @@ Confirm the plugin shows as loaded and the gateway is healthy. Do not ask the us
 /luckee <query>
 ```
 
-Example: `/luckee 查一下 asin B0FFGNZ36F 的信息 用skills`
+Example: `/luckee 查一下 asin B0DPJMTH4N 的信息 用skills`
 
 ### Set a token
 
@@ -67,7 +67,7 @@ Example: `/luckee 查一下 asin B0FFGNZ36F 的信息 用skills`
 Set a token and run a query in one go:
 
 ```
-/luckee token sk_xxx 查一下 asin B0FFGNZ36F 的信息
+/luckee token sk_xxx 查一下 asin B0DPJMTH4N 的信息
 ```
 
 ### AI tool invocation
@@ -76,7 +76,7 @@ Call the `luckee_query` tool with:
 
 ```json
 {
-  "query": "查一下 asin B0FFGNZ36F 的信息 用skills",
+  "query": "查一下 asin B0DPJMTH4N 的信息 用skills",
   "token": "sk_optional_override",
   "language": "CN",
   "timeout": 90
