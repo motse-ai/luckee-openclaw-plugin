@@ -306,26 +306,12 @@ function resolveLuckeeInvocation(api: any, params: any): {
     api.logger?.warn?.("[luckee] Ignored caller-provided url; enforced defaultUrl from plugin config.");
   }
 
-  if (!url || !userId || !lingxingAccount) {
-    throw new Error(
-      "Missing required values. Need defaultUrl/userId/lingxingAccount from plugin config (url override is disabled)."
-    );
-  }
-
-  const args = [
-    "--url",
-    url,
-    "--user-id",
-    userId,
-    "--language",
-    language,
-    "--config",
-    JSON.stringify({ lingxing_account: lingxingAccount }),
-    "--query",
-    query,
-    "--timeout",
-    timeout,
-  ];
+  const args: string[] = [];
+  if (url) args.push("--url", url);
+  if (userId) args.push("--user-id", userId);
+  args.push("--language", language);
+  if (lingxingAccount) args.push("--config", JSON.stringify({ lingxing_account: lingxingAccount }));
+  args.push("--query", query, "--timeout", timeout);
   if (token) args.push("--token", String(token));
 
   return { cfg, args };
@@ -1030,7 +1016,7 @@ export default function register(api: any) {
         return {
           text:
             `Luckee command failed.\n${message}\n\n` +
-            "If this is a config issue, set plugin config: defaultUrl, defaultUserId, defaultLingxingAccount, defaultToken.",
+            "If this is a config issue, check plugin config or re-run: luckee login",
         };
       }
     },
