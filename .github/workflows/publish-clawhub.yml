@@ -31,15 +31,17 @@ jobs:
         id: version
         run: |
           DEFAULT_VERSION="$(node -p "require('./plugin/openclaw.plugin.json').version")"
-          LATEST_TAG="$(git ls-remote --tags --refs origin 'v*' | awk -F/ '{print $3}' | sort -V | tail -n1)"
-          if [ -n "${LATEST_TAG}" ]; then
-            LATEST_VERSION="${LATEST_TAG#v}"
-            IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST_VERSION}"
-            VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          IFS='.' read -r MAJOR MINOR _ <<< "${DEFAULT_VERSION}"
+          DATE_PART="$(date -u +%Y%d%m)"
+          TAG_PREFIX="v${MAJOR}.${MINOR}.${DATE_PART}_"
+          LAST_COUNTER="$(git ls-remote --tags --refs origin "${TAG_PREFIX}*" | awk -F/ '{print $3}' | sed -E "s/^v${MAJOR}\.${MINOR}\.${DATE_PART}_([0-9]+)$/\1/" | sort -n | tail -n1)"
+          if [ -z "${LAST_COUNTER}" ]; then
+            COUNTER=1
           else
-            VERSION="${DEFAULT_VERSION}"
+            COUNTER=$((LAST_COUNTER + 1))
           fi
-          TAG="v${VERSION}"
+          TAG="v${MAJOR}.${MINOR}.${DATE_PART}_${COUNTER}"
+          VERSION="${MAJOR}.${MINOR}.0-${DATE_PART}.${COUNTER}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
