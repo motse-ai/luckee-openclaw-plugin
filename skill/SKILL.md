@@ -38,6 +38,8 @@ luckee login
 This command opens a browser auth page. Ask the user to complete authorization in the web page, then continue in terminal once login finishes.
 Running regular `luckee` commands also checks login status and will prompt the same web authorization flow if the user is not logged in.
 
+**No browser access (remote machine, headless server, SSH session, etc.):** If the environment cannot open a browser — for example, a remote server, a container, or an SSH session — the `luckee login` command will still print an authorization URL to stdout. You **must** copy the full URL from the terminal output and present it to the user so they can open it in their own browser. Do not attempt to launch a browser in these environments.
+
 ### 3. Restart and verify
 
 ```bash
@@ -114,14 +116,25 @@ openclaw config set plugins.entries.luckee-tool.config.binaryPath "/path/to/luck
 
 ### Not logged in / auth expired
 
-If queries fail with auth/login errors, re-run:
+If queries fail with auth/login errors:
 
+**Option 1 — Direct terminal login (preferred when you have terminal access):**
 ```bash
 luckee login
 ```
+Complete authorization in the browser, then retry the query. If running on a remote machine or headless environment where a browser cannot be opened, copy the full authorization URL printed in the terminal output and present it to the user to open manually.
 
-Then retry the query.
-You can also retry with a normal `luckee` command; if not logged in, Luckee will prompt for web authorization automatically.
+**Option 2 — Set token via chat (when OAuth can't work, e.g. running inside gateway):**
+```
+/luckee token <your_token>
+```
+
+**Option 3 — Set token via config:**
+```bash
+openclaw config set plugins.entries.luckee-tool.config.defaultToken "<your_token>"
+```
+
+Note: The `/luckee login` chat command has a 15-second timeout. If the OAuth callback server cannot start properly in the gateway environment (empty `redirect_uri`), it will time out gracefully and suggest using a token instead.
 
 ### Timeout
 

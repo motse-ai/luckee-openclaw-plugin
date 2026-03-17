@@ -221,6 +221,50 @@ function runCommand(command: string, args: string[]): Promise<string> {
   });
 }
 
+function runCommandWithTimeout(
+  command: string,
+  args: string[],
+  timeoutMs: number
+): Promise<{ completed: boolean; output: string; code: number | null }> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+
+    child.on("error", () => {
+      if (settled) return;
+      settled = true;
+      resolve({ completed: true, output: stderr.trim() || stdout.trim() || "command failed", code: -1 });
+    });
+
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      resolve({ completed: true, output: (stdout + stderr).trim(), code });
+    });
+
+    setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill("SIGTERM"); } catch {}
+      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 2000);
+      resolve({ completed: false, output: (stdout + stderr).trim(), code: null });
+    }, timeoutMs);
+  });
+}
+
+function extractAuthUrl(text: string): string | null {
+  if (!text) return null;
+  const m = text.match(/(https?:\/\/\S*auth\S*)/i);
+  return m ? m[1] : null;
+}
+
 async function runCommandDetailed(
   command: string,
   args: string[]
@@ -1050,6 +1094,39 @@ export default function register(api: any) {
             channel: String(ctx.channelId || ctx.channel || ""),
             sender: String(ctx.from || ctx.senderId || ""),
           });
+
+          if (lowerArgs === "login") {
+            try {
+              const result = await runCommandWithTimeout(binaryPath, ["login"], 15_000);
+              if (result.completed && result.code === 0) {
+                return { text: result.output || "luckee login completed." };
+              }
+              if (result.completed) {
+                return { text: `luckee login failed (exit ${result.code}):\n${result.output}` };
+              }
+
+              api.logger?.warn?.(
+                `[luckee] login timed out — OAuth callback unreachable in gateway subprocess. output=${result.output.slice(0, 500)}`
+              );
+              const authUrl = extractAuthUrl(result.output);
+              const urlNote = authUrl
+                ? `\nDetected auth URL (likely incomplete redirect_uri):\n${authUrl}\n`
+                : "";
+              return {
+                text:
+                  "It seems the OAuth login flow isn't working properly in this environment (the redirect_uri is empty).\n" +
+                  urlNote +
+                  "\n**Alternative option:** Do you have a Luckee/Lingxing API token? If so, you can set it directly without browser login:\n\n" +
+                  "```\n/luckee token <your_token>\n```\n\n" +
+                  "Or I can configure it via:\n\n" +
+                  "```\nopenclaw config set plugins.entries.luckee-tool.config.defaultToken \"<your_token>\"\n```\n\n" +
+                  "Would you like to provide a token, or would you prefer to try fixing the browser login another way?",
+              };
+            } catch (err: any) {
+              return { text: `luckee login failed: ${String(err?.message || err)}` };
+            }
+          }
+
           try {
             const output = await runCommand(binaryPath, [lowerArgs]);
             return { text: output || `luckee ${lowerArgs} completed.` };
