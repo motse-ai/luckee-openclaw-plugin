@@ -99,7 +99,10 @@ Only `query` is required. Auth context is handled by CLI/session state (via `luc
 The plugin auto-installs `luckee-cli` via pip when `autoInstallCli` is true (default). If that fails:
 
 ```bash
-pip install --upgrade 'luckee-cli>=0.1.2026031307,<0.2.0'
+python -m pip install --upgrade \
+  --index-url https://test.pypi.org/simple/ \
+  --extra-index-url https://pypi.org/simple \
+  luckee-cli
 openclaw gateway restart
 ```
 

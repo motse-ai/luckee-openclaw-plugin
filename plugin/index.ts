@@ -19,11 +19,14 @@ type LuckeeConfig = {
   pythonPath?: string;
 };
 
-const LUCKEE_CLI_PIP_SPEC = "luckee-cli>=0.1.2026031307,<0.2.0";
+const LUCKEE_CLI_PIP_SPEC = "luckee-cli";
 
 const CLI_INSTALL_GUIDE =
   "luckee CLI is required but was not found.\n" +
-  `Install it with: python -m pip install --upgrade '${LUCKEE_CLI_PIP_SPEC}'\n` +
+  "Install it with: python -m pip install --upgrade " +
+  "--index-url https://test.pypi.org/simple/ " +
+  "--extra-index-url https://pypi.org/simple " +
+  "luckee-cli\n" +
   "Then restart OpenClaw. If your executable name differs, set plugins.entries[\"luckee-tool\"].config.binaryPath.";
 
 const PUSH_CAPABLE_CHANNELS = new Set([
@@ -432,7 +435,12 @@ async function attemptLuckeeCliInstall(
   const pythonCandidates = cfg.pythonPath
     ? [cfg.pythonPath]
     : ["python3", "python", "py"];
-  const pipArgs = ["-m", "pip", "install", "--upgrade", LUCKEE_CLI_PIP_SPEC];
+  const pipArgs = [
+    "-m", "pip", "install", "--upgrade",
+    "--index-url", "https://test.pypi.org/simple/",
+    "--extra-index-url", "https://pypi.org/simple",
+    LUCKEE_CLI_PIP_SPEC,
+  ];
 
   for (const py of pythonCandidates) {
     try {
@@ -1032,6 +1040,24 @@ export default function register(api: any) {
               "Example: /luckee token sk_xxx 查一下 asin B0FFGNZ36F 的信息 用skills",
           };
         }
+        const lowerArgs = rawArgs.toLowerCase();
+        if (lowerArgs === "login" || lowerArgs === "logout") {
+          const cfg: LuckeeConfig =
+            api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
+          const binaryPath = await resolveLuckeeBinaryOrThrow(api, cfg);
+          logLuckeeInvocation(api, "command", {
+            action: lowerArgs,
+            channel: String(ctx.channelId || ctx.channel || ""),
+            sender: String(ctx.from || ctx.senderId || ""),
+          });
+          try {
+            const output = await runCommand(binaryPath, [lowerArgs]);
+            return { text: output || `luckee ${lowerArgs} completed.` };
+          } catch (err: any) {
+            return { text: `luckee ${lowerArgs} failed: ${String(err?.message || err)}` };
+          }
+        }
+
         const senderKey = getSenderKey(ctx);
         const cfg: LuckeeConfig =
           api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
