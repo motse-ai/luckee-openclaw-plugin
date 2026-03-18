@@ -364,7 +364,7 @@ function buildLoginRequiredMessage(authUrl?: string | null): string {
     "Luckee 检测到当前未登录或 token 已失效。\n\n" +
     (authUrl ? `授权链接:\n${authUrl}\n\n` : "") +
     "请通过以下方式之一进行认证：\n\n" +
-    "**方式一：** 在终端运行 `luckee login` 完成浏览器授权\n\n" +
+    "**方式一：** 点击上面链接在浏览器内完成授权\n\n" +
     "**方式二：** 使用 token\n```\n/luckee token <your_token>\n```\n\n" +
     "**方式三：** 配置默认 token\n```\nopenclaw config set plugins.entries.luckee-tool.config.defaultToken \"<your_token>\"\n```"
   );
