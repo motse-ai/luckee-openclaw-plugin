@@ -869,6 +869,25 @@ function buildFeishuCard(text: string): Record<string, any> {
   };
 }
 
+function summarizeFeishuCard(card: Record<string, any>): string {
+  const elements = Array.isArray(card?.body?.elements) ? card.body.elements : [];
+  const buttons = elements.filter((el: any) => el?.tag === "button");
+  return JSON.stringify({
+    schema: card?.schema,
+    tags: elements.map((el: any) => String(el?.tag || "unknown")),
+    buttonCount: buttons.length,
+    buttons: buttons.map((el: any) => ({
+      element_id: el?.element_id,
+      type: el?.type,
+      size: el?.size,
+      width: el?.width,
+      text: el?.text?.content,
+      behaviors: Array.isArray(el?.behaviors) ? el.behaviors.map((b: any) => b?.type) : [],
+      callbackValue: el?.behaviors?.[0]?.value,
+    })),
+  });
+}
+
 function stripFeishuPrefix(id: string): string {
   return id.startsWith("feishu:") ? id.slice(7) : id;
 }
@@ -916,6 +935,12 @@ async function sendFeishuCardNative(
 
     const card = buildFeishuCard(text);
     const cardJson = JSON.stringify(card);
+    api.logger?.info?.(
+      `[luckee] feishu card send payload summary=${summarizeFeishuCard(card)}`
+    );
+    api.logger?.info?.(
+      `[luckee] feishu card send payload json=${safePreview(cardJson, 2500)}`
+    );
 
     const threadId = ctx.messageThreadId != null
       ? String(ctx.messageThreadId).trim()
@@ -942,7 +967,7 @@ async function sendFeishuCardNative(
         try { data = bodyText ? JSON.parse(bodyText) : null; } catch { data = null; }
         if (res.ok && data?.code === 0 && data?.data?.message_id) {
           api.logger?.info?.(
-            `[luckee] feishu card reply sent messageId=${data.data.message_id}`
+            `[luckee] feishu card reply sent messageId=${data.data.message_id} body=${safePreview(bodyText || "", 1000)}`
           );
           return { ok: true, messageId: data.data.message_id };
         }
@@ -981,7 +1006,9 @@ async function sendFeishuCardNative(
         `[luckee] feishu card send failed status=${res.status} body=${(bodyText || "").slice(0, 500)}`
       );
     } else {
-      api.logger?.info?.(`[luckee] feishu card send ok messageId=${messageId}`);
+      api.logger?.info?.(
+        `[luckee] feishu card send ok messageId=${messageId} body=${safePreview(bodyText || "", 1000)}`
+      );
     }
     return { ok, messageId };
   } catch (err: any) {
@@ -1150,6 +1177,12 @@ async function updateFeishuCardNative(
     if (!token) return false;
 
     const card = buildFeishuCard(text);
+    api.logger?.info?.(
+      `[luckee] feishu card patch payload summary=${summarizeFeishuCard(card)} messageId=${messageId}`
+    );
+    api.logger?.info?.(
+      `[luckee] feishu card patch payload json=${safePreview(JSON.stringify(card), 2500)}`
+    );
     const res = await fetch(
       `https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`,
       {
@@ -1172,6 +1205,10 @@ async function updateFeishuCardNative(
     if (!ok) {
       api.logger?.warn?.(
         `[luckee] feishu native patch failed status=${res.status} body=${bodyText.slice(0, 500)}`
+      );
+    } else {
+      api.logger?.info?.(
+        `[luckee] feishu native patch ok messageId=${messageId} body=${safePreview(bodyText || "", 1000)}`
       );
     }
     return ok;
