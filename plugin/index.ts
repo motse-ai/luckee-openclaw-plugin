@@ -72,6 +72,16 @@ type AuthWaitSession = TrackedProcess & {
   origin: "tool" | "command";
 };
 
+type FeishuCardOptions = {
+  stopButtonDisabled?: boolean;
+  stopButtonText?: string;
+};
+
+type ActiveFeishuProgressCard = {
+  messageId: string;
+  text: string;
+};
+
 type StreamingRaceResult =
   | { kind: "done"; output: string }
   | { kind: "error"; error: any }
@@ -83,6 +93,7 @@ type InteractiveLuckeeResult =
 
 const activeProcesses = new Map<string, TrackedProcess>();
 const authWaitSessions = new Map<string, AuthWaitSession>();
+const activeFeishuProgressCards = new Map<string, ActiveFeishuProgressCard>();
 
 type LuckeeTokenStore = {
   version: 1;
@@ -363,6 +374,33 @@ function withProgressFooter(text: string, tick: number): string {
 
 function withDoneFooter(text: string): string {
   return `${text}\n\n---\n✅ Completed`;
+}
+
+function withStoppedFooter(text: string): string {
+  return `${text}\n\n---\n⏹️ Stopped`;
+}
+
+function stripStatusFooter(text: string): string {
+  return String(text || "").replace(
+    /\n\n---\n(?:⏳ Still loading\.{1,3}|✅ Completed|⏹️ Stopped)\s*$/s,
+    ""
+  );
+}
+
+function rememberActiveFeishuProgressCard(
+  processKey: string,
+  messageId: string | undefined,
+  text: string
+): void {
+  if (!processKey || !messageId) return;
+  activeFeishuProgressCards.set(processKey, { messageId, text });
+}
+
+function forgetActiveFeishuProgressCard(processKey: string, messageId?: string): void {
+  const current = activeFeishuProgressCards.get(processKey);
+  if (!current) return;
+  if (messageId && current.messageId !== messageId) return;
+  activeFeishuProgressCards.delete(processKey);
 }
 
 function resolveLuckeeInvocation(api: any, params: any): {
@@ -825,11 +863,38 @@ function buildMessageArgs(ctx: any, text: string): string[] {
   return args;
 }
 
-function buildFeishuCard(text: string): Record<string, any> {
+function buildFeishuCard(text: string, options: FeishuCardOptions = {}): Record<string, any> {
   const markdownSafeText = text.replace(
     /(https?:\/\/[^\s<>"`]+)/g,
     (_m, url: string) => `[Open URL](${url})`
   );
+  const stopButtonDisabled = Boolean(options.stopButtonDisabled);
+  const stopButtonText = options.stopButtonText || "Stop Current Query";
+  const stopButton: Record<string, any> = {
+    tag: "button",
+    element_id: "stop_luckee",
+    margin: "8px 0 0 0",
+    type: stopButtonDisabled ? "default" : "danger_filled",
+    size: "small",
+    width: "fill",
+    disabled: stopButtonDisabled,
+    text: {
+      tag: "plain_text",
+      content: stopButtonText,
+    },
+  };
+  if (!stopButtonDisabled) {
+    stopButton.behaviors = [
+      {
+        type: "callback",
+        value: {
+          action: "luckee_stop",
+          command: "/luckee stop",
+          text: "/luckee stop",
+        },
+      },
+    ];
+  }
   return {
     schema: "2.0",
     config: {
@@ -851,27 +916,7 @@ function buildFeishuCard(text: string): Record<string, any> {
         {
           tag: "hr",
         },
-        {
-          tag: "button",
-          element_id: "stop_luckee",
-          margin: "8px 0 0 0",
-          type: "danger_filled",
-          size: "small",
-          width: "fill",
-          text: {
-            tag: "plain_text",
-            content: "Stop Current Query",
-          },
-          behaviors: [
-            {
-              type: "callback",
-              value: {
-                command: "/luckee stop",
-                text: "/luckee stop",
-              },
-            },
-          ],
-        },
+        stopButton,
       ],
     },
   };
@@ -923,7 +968,8 @@ function resolveFeishuReceiveId(ctx: any): { receiveId: string; receiveIdType: s
 async function sendFeishuCardNative(
   api: any,
   ctx: any,
-  text: string
+  text: string,
+  options: FeishuCardOptions = {}
 ): Promise<{ ok: boolean; messageId?: string }> {
   try {
     const token = await getFeishuTenantToken(api);
@@ -941,7 +987,7 @@ async function sendFeishuCardNative(
       return { ok: false };
     }
 
-    const card = buildFeishuCard(text);
+    const card = buildFeishuCard(text, options);
     const cardJson = JSON.stringify(card);
     api.logger?.info?.(
       `[luckee] feishu card send payload summary=${summarizeFeishuCard(card)}`
@@ -1178,13 +1224,14 @@ async function getFeishuTenantToken(api: any): Promise<string | null> {
 async function updateFeishuCardNative(
   api: any,
   messageId: string,
-  text: string
+  text: string,
+  options: FeishuCardOptions = {}
 ): Promise<boolean> {
   try {
     const token = await getFeishuTenantToken(api);
     if (!token) return false;
 
-    const card = buildFeishuCard(text);
+    const card = buildFeishuCard(text, options);
     api.logger?.info?.(
       `[luckee] feishu card patch payload summary=${summarizeFeishuCard(card)} messageId=${messageId}`
     );
@@ -1232,7 +1279,8 @@ async function sendProgressMessageEditable(
   api: any,
   ctx: any,
   text: string,
-  prevMessageId?: string
+  prevMessageId?: string,
+  options: FeishuCardOptions = {}
 ): Promise<{ ok: boolean; messageId?: string; edited: boolean }> {
   const channel = String(ctx.channelId || ctx.channel || "").trim();
   const target = resolveMessageTarget(ctx);
@@ -1249,7 +1297,7 @@ async function sendProgressMessageEditable(
       `[luckee] sendProgressMessageEditable: EDIT mode channel=${channel} messageId=${prevMessageId}`
     );
     if (channel === "feishu") {
-      const ok = await updateFeishuCardNative(api, prevMessageId, text);
+      const ok = await updateFeishuCardNative(api, prevMessageId, text, options);
       if (ok) return { ok: true, messageId: prevMessageId, edited: true };
       api.logger?.warn?.(
         `[luckee] feishu native PATCH failed for ${prevMessageId}; not falling back to openclaw edit for progress cards`
@@ -1282,7 +1330,7 @@ async function sendProgressMessageEditable(
     `[luckee] sendProgressMessageEditable: SEND mode channel=${channel} target=${target}`
   );
   if (channel === "feishu") {
-    const cardResult = await sendFeishuCardNative(api, ctx, text);
+    const cardResult = await sendFeishuCardNative(api, ctx, text, options);
     if (cardResult.ok && cardResult.messageId) {
       return { ok: true, messageId: cardResult.messageId, edited: false };
     }
@@ -1368,6 +1416,115 @@ function stopTrackedProcess(
     kind,
     query: proc.query,
   };
+}
+
+function extractLuckeeCallbackPayload(ctx: any): Record<string, any> | null {
+  const candidates = [
+    ctx?.callbackValue,
+    ctx?.value,
+    ctx?.action?.value,
+    ctx?.event?.action?.value,
+    ctx?.data?.action?.value,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (typeof candidate === "object") return candidate;
+    const raw = String(candidate || "").trim();
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      // Ignore: callback payload may just be plain text.
+    }
+    return { command: raw, text: raw };
+  }
+  return null;
+}
+
+function resolveLuckeeCommandArgs(ctx: any): string {
+  const directArgs = String(ctx?.args ?? "").trim();
+  if (directArgs) return directArgs;
+  const callbackPayload = extractLuckeeCallbackPayload(ctx);
+  const rawCommand = String(
+    callbackPayload?.command || callbackPayload?.text || callbackPayload?.action || ""
+  ).trim();
+  if (!rawCommand) return "";
+  if (/^\/luckee(?:\s+|$)/i.test(rawCommand)) {
+    return rawCommand.replace(/^\/luckee(?:\s+|$)/i, "").trim();
+  }
+  return rawCommand === "luckee_stop" ? "stop" : rawCommand;
+}
+
+function extractFeishuMessageId(ctx: any): string | undefined {
+  const candidates = [
+    ctx?.messageId,
+    ctx?.message_id,
+    ctx?.openMessageId,
+    ctx?.open_message_id,
+    ctx?.message?.messageId,
+    ctx?.message?.message_id,
+    ctx?.message?.open_message_id,
+    ctx?.action?.messageId,
+    ctx?.action?.message_id,
+    ctx?.action?.open_message_id,
+    ctx?.event?.messageId,
+    ctx?.event?.message_id,
+    ctx?.event?.open_message_id,
+  ];
+  for (const candidate of candidates) {
+    const value = String(candidate || "").trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
+async function disableFeishuStopButton(
+  api: any,
+  processKey: string,
+  ctx: any,
+  fallbackText: string,
+  buttonText: string,
+  appendStoppedFooter: boolean
+): Promise<void> {
+  const trackedCard = activeFeishuProgressCards.get(processKey);
+  const messageId = trackedCard?.messageId || extractFeishuMessageId(ctx);
+  if (!messageId) return;
+  const baseText = stripStatusFooter(trackedCard?.text || fallbackText || "当前查询已停止。");
+  const nextText = appendStoppedFooter ? withStoppedFooter(baseText) : baseText;
+  const ok = await updateFeishuCardNative(api, messageId, nextText, {
+    stopButtonDisabled: true,
+    stopButtonText: buttonText,
+  });
+  if (ok) {
+    forgetActiveFeishuProgressCard(processKey, trackedCard?.messageId || messageId);
+  }
+}
+
+async function handleLuckeeStop(api: any, ctx?: any): Promise<string> {
+  const processKey = ctx ? getSenderKey(ctx) : "";
+  const stopped = stopTrackedProcess(processKey);
+  if (stopped.stopped) {
+    api.logger?.info?.(
+      `[luckee] stop requested: killed ${stopped.kind || "process"} query="${safePreview(stopped.query || "", 80)}"`
+    );
+  }
+  const text = stopped.stopped
+    ? stopped.kind === "auth"
+      ? `已停止登录等待: ${safePreview(stopped.query || "", 50)}`
+      : `已停止查询: ${safePreview(stopped.query || "", 50)}`
+    : "当前没有正在运行的查询。";
+  if (processKey) {
+    await disableFeishuStopButton(
+      api,
+      processKey,
+      ctx,
+      text,
+      stopped.stopped ? "Query Stopped" : "No Active Query",
+      stopped.stopped
+    );
+  }
+  return text;
 }
 
 async function saveTokenForContext(
@@ -1462,14 +1619,15 @@ function settleDetachedAuthWait(params: {
     setProgressMessageId,
   } = params;
 
-  const updateCard = async (text: string) => {
+  const updateCard = async (text: string, options: FeishuCardOptions = {}) => {
     const currentSession = authWaitSessions.get(processKey);
     if (!currentSession || currentSession.id !== sessionId) return;
     const currentMessageId = getProgressMessageId();
     if (!currentMessageId) return;
-    const result = await sendProgressMessageEditable(api, ctx, text, currentMessageId);
+    const result = await sendProgressMessageEditable(api, ctx, text, currentMessageId, options);
     if (result.ok && result.messageId) {
       setProgressMessageId(result.messageId);
+        rememberActiveFeishuProgressCard(processKey, result.messageId, text);
       const latest = authWaitSessions.get(processKey);
       if (latest && latest.id === sessionId) {
         latest.messageId = result.messageId;
@@ -1483,9 +1641,11 @@ function settleDetachedAuthWait(params: {
       if (!currentSession || currentSession.id !== sessionId) return;
 
       await updateCard(
-        withDoneFooter(normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output))
+        withDoneFooter(normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)),
+        { stopButtonDisabled: true, stopButtonText: "Query Completed" }
       );
       authWaitSessions.delete(processKey);
+      forgetActiveFeishuProgressCard(processKey);
       api.logger?.info?.(
         `[luckee] ${origin} success(detached auth wait): query="${safePreview(query)}" outputChars=${output.length}`
       );
@@ -1502,8 +1662,12 @@ function settleDetachedAuthWait(params: {
         errMsg.includes("timed out") || errMsg.includes("180s")
           ? "⏰ 登录超时，请重试或使用 `/luckee token <your_token>` 设置 token。"
           : `登录后查询失败: ${safePreview(errMsg, 200)}`;
-      await updateCard(failText);
+      await updateCard(failText, {
+        stopButtonDisabled: true,
+        stopButtonText: "Query Failed",
+      });
       authWaitSessions.delete(processKey);
+      forgetActiveFeishuProgressCard(processKey);
       api.logger?.info?.(
         `[luckee] ${origin} detached auth wait failed: query="${safePreview(query)}" error=${safePreview(errMsg, 200)}`
       );
@@ -1584,17 +1748,17 @@ async function executeLuckeeInteractive(
     let accumulated = "";
     let loadingTick = 0;
     let loginDetected = false;
+    const processKey = senderKey;
     const abortHandle: { kill: () => void } = { kill: () => {} };
     const initText = `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
     const initResult = await sendProgressMessageEditable(api, ctx, initText);
     if (initResult.ok && initResult.messageId) {
       progressMessageId = initResult.messageId;
+      rememberActiveFeishuProgressCard(processKey, initResult.messageId, initText);
       api.logger?.info?.(
         `[luckee] ${origin} initial progress sent: messageId=${initResult.messageId} channel=${channel}`
       );
     }
-
-    const processKey = getSenderKey(ctx);
     activeProcesses.set(processKey, { kill: () => abortHandle.kill(), query });
 
     let resolveAuthWaitReady: ((sessionId: string) => void) | null = null;
@@ -1623,6 +1787,7 @@ async function executeLuckeeInteractive(
         );
         if (loginResult.ok) {
           progressMessageId = loginResult.messageId || progressMessageId;
+          rememberActiveFeishuProgressCard(processKey, progressMessageId, buildLoginRequiredMessage(authUrl));
         }
 
         const session = createAuthWaitSession(
@@ -1650,6 +1815,7 @@ async function executeLuckeeInteractive(
       );
       if (edited.ok) {
         progressMessageId = edited.messageId || progressMessageId;
+        rememberActiveFeishuProgressCard(processKey, progressMessageId, progressText);
       }
     };
 
@@ -1708,10 +1874,14 @@ async function executeLuckeeInteractive(
         const finalText = withDoneFooter(
           normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)
         );
-        const finalResult = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
+        const finalResult = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId, {
+          stopButtonDisabled: true,
+          stopButtonText: "Query Completed",
+        });
         if (finalResult.ok && finalResult.messageId) {
           progressMessageId = finalResult.messageId;
         }
+        forgetActiveFeishuProgressCard(processKey, progressMessageId);
       }
 
       api.logger?.info?.(
@@ -1735,7 +1905,7 @@ export default function register(api: any) {
     description: "Run Luckee queries directly from chat.",
     acceptsArgs: true,
     async handler(ctx: any) {
-      const parsed = parseLuckeeCommandArgs(String(ctx.args ?? ""));
+      const parsed = parseLuckeeCommandArgs(resolveLuckeeCommandArgs(ctx));
       const runtimeCfg: LuckeeConfig =
         api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
 
@@ -1744,19 +1914,8 @@ export default function register(api: any) {
       }
 
       if (parsed.action === "stop") {
-        const stopped = stopTrackedProcess(getSenderKey(ctx));
-        if (stopped.stopped) {
-          api.logger?.info?.(
-            `[luckee] command stop: killed ${stopped.kind || "process"} query="${safePreview(stopped.query || "", 80)}"`
-          );
-          return {
-            text:
-              stopped.kind === "auth"
-                ? `已停止登录等待: ${safePreview(stopped.query || "", 50)}`
-                : `已停止查询: ${safePreview(stopped.query || "", 50)}`,
-          };
-        }
-        return { text: "当前没有正在运行的查询。" };
+        const stopText = await handleLuckeeStop(api, ctx);
+        return { text: stopText };
       }
 
       if (parsed.action === "token") {
@@ -1858,26 +2017,9 @@ export default function register(api: any) {
         "Call this tool when the user wants to stop, cancel, or abort a running luckee query.",
       parameters: Type.Object({}),
       async execute(_id: string, _params: any, ctx?: any) {
-        const key = ctx ? getSenderKey(ctx) : "";
-        const stopped = stopTrackedProcess(key);
-        if (stopped.stopped) {
-          api.logger?.info?.(
-            `[luckee] stop tool: killed ${stopped.kind || "process"} query="${safePreview(stopped.query || "", 80)}"`
-          );
-          return {
-            content: [
-              {
-                type: "text",
-                text:
-                  stopped.kind === "auth"
-                    ? `已停止登录等待: ${safePreview(stopped.query || "", 50)}`
-                    : `已停止查询: ${safePreview(stopped.query || "", 50)}`,
-              },
-            ],
-          };
-        }
+        const stopText = await handleLuckeeStop(api, ctx);
         return {
-          content: [{ type: "text", text: "当前没有正在运行的查询。" }],
+          content: [{ type: "text", text: stopText }],
         };
       },
     }
