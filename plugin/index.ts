@@ -442,12 +442,34 @@ async function resolveLuckeeBinaryOrThrow(
     }
   }
 
+  // PATH-based probe failed; check common pip script directories
+  const scriptDirs = await getPipScriptsDirs(cfg);
+  for (const dir of scriptDirs) {
+    for (const name of ["luckee-cli", "luckee"]) {
+      const fullPath = path.join(dir, name);
+      if (candidates.includes(fullPath)) continue;
+      try {
+        const result = await runCommandDetailed(fullPath, ["--version"]);
+        if (isLuckeeProbeSuccess(fullPath, result)) {
+          resolvedBinaryByConfig.set(cacheKey, fullPath);
+          api.logger?.info?.(
+            `[luckee] found existing binary in pip scripts dir: ${fullPath}`
+          );
+          return fullPath;
+        }
+      } catch {
+        // continue
+      }
+    }
+  }
+
   const allowAutoInstall = cfg.autoInstallCli !== false;
   const alreadyAttemptedAutoInstall = attemptedAutoInstallByConfig.has(cacheKey);
   if (allowAutoInstall && !alreadyAttemptedAutoInstall) {
     attemptedAutoInstallByConfig.add(cacheKey);
     const installResult = await attemptLuckeeCliInstall(api, cfg);
     if (installResult.ok) {
+      // Re-probe PATH-based candidates first
       for (const candidate of candidates) {
         try {
           const result = await runCommandDetailed(candidate, ["--version"]);
@@ -460,6 +482,24 @@ async function resolveLuckeeBinaryOrThrow(
           // continue
         }
       }
+      // PATH-based probe failed; scan pip script directories
+      const scriptDirs = await getPipScriptsDirs(cfg);
+      api.logger?.info?.(`[luckee] scanning pip script dirs: ${JSON.stringify(scriptDirs)}`);
+      for (const dir of scriptDirs) {
+        for (const name of ["luckee-cli", "luckee"]) {
+          const fullPath = path.join(dir, name);
+          try {
+            const result = await runCommandDetailed(fullPath, ["--version"]);
+            if (isLuckeeProbeSuccess(fullPath, result)) {
+              resolvedBinaryByConfig.set(cacheKey, fullPath);
+              api.logger?.info?.(`[luckee] found binary in pip scripts dir: ${fullPath}`);
+              return fullPath;
+            }
+          } catch {
+            // continue
+          }
+        }
+      }
     } else {
       probeErrors.push(`auto-install failed: ${installResult.reason}`);
     }
@@ -470,6 +510,33 @@ async function resolveLuckeeBinaryOrThrow(
       `Checked binaries: ${candidates.join(", ")}\n` +
       (probeErrors.length ? `Probe details: ${probeErrors.join(" | ")}` : "")
   );
+}
+
+async function getPipScriptsDirs(cfg: LuckeeConfig): Promise<string[]> {
+  const pythonCandidates = cfg.pythonPath
+    ? [cfg.pythonPath]
+    : ["python3", "python", "py"];
+  const dirs: string[] = [];
+
+  for (const py of pythonCandidates) {
+    for (const snippet of [
+      "import sysconfig; print(sysconfig.get_path('scripts', sysconfig.get_preferred_scheme('user')))",
+      "import sysconfig; print(sysconfig.get_path('scripts'))",
+    ]) {
+      try {
+        const result = await runCommandDetailed(py, ["-c", snippet]);
+        if (result.code === 0 && result.stdout.trim()) {
+          dirs.push(result.stdout.trim());
+        }
+      } catch {
+        // continue
+      }
+    }
+    break;
+  }
+
+  dirs.push(path.join(os.homedir(), ".local", "bin"));
+  return [...new Set(dirs)];
 }
 
 async function attemptLuckeeCliInstall(
