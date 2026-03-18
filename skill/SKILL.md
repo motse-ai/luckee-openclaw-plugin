@@ -77,6 +77,16 @@ Confirm the plugin shows as loaded and the gateway is healthy. Do not ask the us
 
 Example: `/luckee 查一下 asin B0DPJMTH4N 的信息 用skills`
 
+### Stop a running query
+
+```
+/luckee stop
+```
+or
+```
+/stop
+```
+
 ### Set a token
 
 ```
@@ -135,7 +145,6 @@ python3 -c "import sysconfig; print(sysconfig.get_path('scripts', sysconfig.get_
 ```bash
 python -m pip install --upgrade \
   --index-url https://test.pypi.org/simple/ \
-  --extra-index-url https://pypi.org/simple \
   luckee-cli
 ```
 

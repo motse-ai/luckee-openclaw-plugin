@@ -60,6 +60,7 @@ const persistedTokenBySenderHash = new Map<string, string>();
 let persistedDefaultToken: string | undefined;
 let tokenStoreLoaded = false;
 let tokenStoreLoadPromise: Promise<void> | null = null;
+const activeProcesses = new Map<string, { kill: () => void; query: string }>();
 
 type LuckeeTokenStore = {
   version: 1;
@@ -263,6 +264,16 @@ function extractAuthUrl(text: string): string | null {
   if (!text) return null;
   const m = text.match(/(https?:\/\/\S*auth\S*)/i);
   return m ? m[1] : null;
+}
+
+function detectLoginRequired(text: string): boolean {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return (
+    lower.includes("starting oauth login") ||
+    lower.includes("no valid token provided") ||
+    lower.includes("open this url to continue login")
+  );
 }
 
 async function runCommandDetailed(
@@ -576,12 +587,19 @@ function runCommandStreaming(
   args: string[],
   onFlush: (chunk: string) => Promise<void>,
   flushEveryMs = 2500,
-  onTick?: () => Promise<void>
+  onTick?: () => Promise<void>,
+  abortHandle?: { kill: () => void }
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    if (abortHandle) {
+      abortHandle.kill = () => {
+        try { child.kill("SIGTERM"); } catch {}
+        setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 2000);
+      };
+    }
     let stdout = "";
     let stderr = "";
     let pending = "";
@@ -1128,6 +1146,43 @@ export default function register(api: any) {
     }
   );
 
+  api.registerTool(
+    {
+      name: "luckee_stop",
+      description:
+        "Stop a currently running luckee query. " +
+        "Call this tool when the user wants to stop, cancel, or abort a running luckee query.",
+      parameters: Type.Object({}),
+      async execute(_id: string, _params: any, ctx?: any) {
+        const key = ctx ? getSenderKey(ctx) : "";
+        let proc = key ? activeProcesses.get(key) : undefined;
+        if (!proc && activeProcesses.size === 1) {
+          const [onlyKey, onlyProc] = [...activeProcesses.entries()][0];
+          proc = onlyProc;
+          if (proc) {
+            proc.kill();
+            activeProcesses.delete(onlyKey);
+            api.logger?.info?.(`[luckee] stop tool: killed query="${safePreview(proc.query, 80)}"`);
+            return {
+              content: [{ type: "text", text: `已停止查询: ${safePreview(proc.query, 50)}` }],
+            };
+          }
+        }
+        if (proc) {
+          proc.kill();
+          activeProcesses.delete(key);
+          api.logger?.info?.(`[luckee] stop tool: killed query="${safePreview(proc.query, 80)}"`);
+          return {
+            content: [{ type: "text", text: `已停止查询: ${safePreview(proc.query, 50)}` }],
+          };
+        }
+        return {
+          content: [{ type: "text", text: "当前没有正在运行的查询。" }],
+        };
+      },
+    }
+  );
+
   api.registerCommand({
     name: "luckee",
     description: "Run luckee query and return result directly.",
@@ -1147,7 +1202,8 @@ export default function register(api: any) {
               "Usage:\n" +
               "/luckee <query>\n" +
               "/luckee token <token>\n" +
-              "/luckee token <token> <query>\n\n" +
+              "/luckee token <token> <query>\n" +
+              "/luckee stop — 停止正在运行的查询\n\n" +
               "Example: /luckee token sk_xxx 查一下 asin B0FFGNZ36F 的信息 用skills",
           };
         }
@@ -1202,6 +1258,17 @@ export default function register(api: any) {
           }
         }
 
+        if (lowerArgs === "stop") {
+          const key = getSenderKey(ctx);
+          const proc = activeProcesses.get(key);
+          if (proc) {
+            proc.kill();
+            activeProcesses.delete(key);
+            return { text: `已停止查询: ${safePreview(proc.query, 50)}` };
+          }
+          return { text: "当前没有正在运行的查询。" };
+        }
+
         const senderKey = getSenderKey(ctx);
         const cfg: LuckeeConfig =
           api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
@@ -1234,6 +1301,8 @@ export default function register(api: any) {
         let progressMessageId: string | undefined;
         let accumulated = "";
         let loadingTick = 0;
+        let loginDetected = false;
+        const abortHandle: { kill: () => void } = { kill: () => {} };
         const flushEveryMs = Math.max(300, Number(cfg.streamFlushMs ?? 1000));
         const storedToken =
           tokenBySender.get(senderKey) || persistedTokenBySenderHash.get(hashSenderKey(senderKey));
@@ -1275,6 +1344,7 @@ export default function register(api: any) {
         }
 
         const pushProgress = async (chunk?: string) => {
+          if (loginDetected) return;
           if (chunk) {
             accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
             if (accumulated.length > 3500) {
@@ -1282,6 +1352,29 @@ export default function register(api: any) {
             }
           }
           if (!accumulated && !progressMessageId) return;
+
+          if (detectLoginRequired(accumulated)) {
+            loginDetected = true;
+            const authUrl = extractAuthUrl(accumulated);
+            const loginText =
+              "🔐 **需要登录**\n\n" +
+              "Luckee 检测到当前未登录或 token 已失效。\n\n" +
+              (authUrl ? `授权链接:\n${authUrl}\n\n` : "") +
+              "请通过以下方式之一进行认证：\n\n" +
+              "**方式一：** 在终端运行 `luckee login` 完成浏览器授权\n\n" +
+              "**方式二：** 使用 token\n```\n/luckee token <your_token>\n```\n\n" +
+              "**方式三：** 配置默认 token\n```\nopenclaw config set plugins.entries.luckee-tool.config.defaultToken \"<your_token>\"\n```";
+            if (progressMessageId) {
+              await sendProgressMessageEditable(api, ctx, loginText, progressMessageId);
+            } else if (channel === "feishu") {
+              const r = await sendFeishuCardNative(api, ctx, loginText);
+              if (r.ok && r.messageId) progressMessageId = r.messageId;
+            } else {
+              await sendProgressMessage(ctx, loginText);
+            }
+            streamed = true;
+            return;
+          }
 
           const displayText = accumulated
             ? normalizeWrappedUrls(accumulated)
@@ -1305,30 +1398,75 @@ export default function register(api: any) {
           if (sent) streamed = true;
         };
 
-        const output = await runCommandStreaming(
-          binaryPath,
-          args,
-          async (chunk) => pushProgress(chunk),
-          flushEveryMs,
-          async () => pushProgress()
-        );
+        const processKey = getSenderKey(ctx);
+        activeProcesses.set(processKey, { kill: () => abortHandle.kill(), query });
 
-        if (streamed) {
-          if (progressMessageId) {
-            const finalText = withDoneFooter(
-              normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)
+        try {
+          const output = await runCommandStreaming(
+            binaryPath,
+            args,
+            async (chunk) => pushProgress(chunk),
+            flushEveryMs,
+            async () => pushProgress(),
+            abortHandle
+          );
+
+          if (loginDetected) {
+            if (progressMessageId) {
+              const finalText = withDoneFooter(
+                normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)
+              );
+              await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
+            }
+            api.logger?.info?.(
+              `[luckee] command success(after login): query="${safePreview(query)}" outputChars=${output.length}`
             );
-            await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
+            return streamed ? { text: "luckee 执行完成。" } : { text: output };
+          }
+
+          if (streamed) {
+            if (progressMessageId) {
+              const finalText = withDoneFooter(
+                normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)
+              );
+              await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
+            }
+            api.logger?.info?.(
+              `[luckee] command success(streamed): query="${safePreview(query)}" outputChars=${output.length}`
+            );
+            return { text: "luckee 执行完成，流式结果已分段推送。" };
           }
           api.logger?.info?.(
-            `[luckee] command success(streamed): query="${safePreview(query)}" outputChars=${output.length}`
+            `[luckee] command success: query="${safePreview(query)}" outputChars=${output.length}`
           );
-          return { text: "luckee 执行完成，流式结果已分段推送。" };
+          return { text: output };
+        } catch (streamErr: any) {
+          if (loginDetected) {
+            api.logger?.info?.("[luckee] command failed after login prompt");
+            if (progressMessageId) {
+              const errMsg = String(streamErr?.message || streamErr || "");
+              const failText =
+                errMsg.includes("timed out") || errMsg.includes("180s")
+                  ? "⏰ 登录超时，请重试或使用 `/luckee token <your_token>` 设置 token。"
+                  : `登录后查询失败: ${safePreview(errMsg, 200)}`;
+              await sendProgressMessageEditable(api, ctx, failText, progressMessageId);
+            }
+            return { text: "查询未完成，请检查登录状态后重试。" };
+          }
+          if (!activeProcesses.has(processKey)) {
+            api.logger?.info?.("[luckee] command stopped by user");
+            if (progressMessageId) {
+              const stoppedText =
+                (accumulated ? normalizeWrappedUrls(accumulated) + "\n\n" : "") +
+                "⛔ 查询已被手动停止";
+              await sendProgressMessageEditable(api, ctx, stoppedText, progressMessageId);
+            }
+            return { text: "查询已被手动停止。" };
+          }
+          throw streamErr;
+        } finally {
+          activeProcesses.delete(processKey);
         }
-        api.logger?.info?.(
-          `[luckee] command success: query="${safePreview(query)}" outputChars=${output.length}`
-        );
-        return { text: output };
       } catch (err: any) {
         const raw = String(err?.message || err || "Unknown error");
         const message = raw.length > 1200 ? `${raw.slice(0, 1200)}...` : raw;
@@ -1339,6 +1477,23 @@ export default function register(api: any) {
             "If this is a config issue, check plugin config or re-run: luckee login",
         };
       }
+    },
+  });
+
+  api.registerCommand({
+    name: "stop",
+    description: "Stop a running luckee query.",
+    acceptsArgs: false,
+    requireAuth: false,
+    handler: async (ctx: any) => {
+      const key = getSenderKey(ctx);
+      const proc = activeProcesses.get(key);
+      if (proc) {
+        proc.kill();
+        activeProcesses.delete(key);
+        return { text: `已停止查询: ${safePreview(proc.query, 50)}` };
+      }
+      return { text: "当前没有正在运行的查询。" };
     },
   });
 }
