@@ -1202,7 +1202,7 @@ async function sendProgressMessageEditable(
     return { ok: false, edited: false };
   }
 
-  // --- EDIT mode: only try to update the existing message, never create new ones ---
+  // --- EDIT mode: update the existing progress message ---
   if (prevMessageId) {
     api.logger?.info?.(
       `[luckee] sendProgressMessageEditable: EDIT mode channel=${channel} messageId=${prevMessageId}`
@@ -1210,9 +1210,10 @@ async function sendProgressMessageEditable(
     if (channel === "feishu") {
       const ok = await updateFeishuCardNative(api, prevMessageId, text);
       if (ok) return { ok: true, messageId: prevMessageId, edited: true };
-      api.logger?.info?.(
-        `[luckee] feishu native PATCH failed for ${prevMessageId}, trying openclaw edit`
+      api.logger?.warn?.(
+        `[luckee] feishu native PATCH failed for ${prevMessageId}; not falling back to openclaw edit for progress cards`
       );
+      return { ok: false, messageId: prevMessageId, edited: false };
     }
     const editArgs = [
       "message",
@@ -1235,7 +1236,7 @@ async function sendProgressMessageEditable(
     return { ok: false, messageId: prevMessageId, edited: false };
   }
 
-  // --- SEND mode: create the first message, try native card then openclaw fallback ---
+  // --- SEND mode: create the first progress message ---
   api.logger?.info?.(
     `[luckee] sendProgressMessageEditable: SEND mode channel=${channel} target=${target}`
   );
@@ -1244,9 +1245,10 @@ async function sendProgressMessageEditable(
     if (cardResult.ok && cardResult.messageId) {
       return { ok: true, messageId: cardResult.messageId, edited: false };
     }
-    api.logger?.info?.(
-      `[luckee] feishu native card send failed, falling back to openclaw send`
+    api.logger?.warn?.(
+      `[luckee] feishu native card send failed; not falling back to openclaw send for progress cards`
     );
+    return { ok: false, edited: false };
   }
   const sendArgs = ["message", "send", ...buildMessageArgs(ctx, text), "--json"];
   const result = await runCommandDetailed("openclaw", sendArgs);
