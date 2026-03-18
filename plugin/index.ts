@@ -844,49 +844,23 @@ function buildFeishuCard(text: string): Record<string, any> {
           tag: "hr",
         },
         {
-          tag: "column_set",
-          flex_mode: "none",
-          background_style: "default",
-          horizontal_spacing: "12px",
-          columns: [
+          tag: "button",
+          element_id: "stop_luckee",
+          margin: "8px 0 0 0",
+          type: "danger_filled",
+          size: "small",
+          width: "fill",
+          text: {
+            tag: "plain_text",
+            content: "Stop Current Query",
+          },
+          behaviors: [
             {
-              tag: "column",
-              width: "weighted",
-              weight: 1,
-              vertical_align: "center",
-              elements: [
-                {
-                  tag: "markdown",
-                  content: "**操作**",
-                },
-              ],
-            },
-            {
-              tag: "column",
-              width: "auto",
-              vertical_align: "center",
-              elements: [
-                {
-                  tag: "button",
-                  element_id: "stop_luckee",
-                  type: "danger",
-                  size: "small",
-                  width: "default",
-                  text: {
-                    tag: "plain_text",
-                    content: "Stop",
-                  },
-                  behaviors: [
-                    {
-                      type: "callback",
-                      value: {
-                        command: "/luckee stop",
-                        text: "/luckee stop",
-                      },
-                    },
-                  ],
-                },
-              ],
+              type: "callback",
+              value: {
+                command: "/luckee stop",
+                text: "/luckee stop",
+              },
             },
           ],
         },
