@@ -65,7 +65,7 @@ The plugin sends real-time streaming progress updates on channels that support p
 - `synology-chat`
 - `tlon`
 
-On Feishu, progress messages are now sent through OpenClaw only. If `openclaw message edit` is unsupported for the current Feishu message type, the plugin falls back to an OpenClaw-only replacement flow: send the updated progress message, then best-effort delete the previous one.
+On Feishu, the plugin prefers native interactive card delivery again. It reuses the Feishu credentials already configured on the OpenClaw channel and does not ask users to enter separate plugin-specific app credentials.
 
 ## Token Store Format
 
@@ -118,20 +118,13 @@ After auto-install, the binary probe runs again. Results are cached per configur
 
 ## Feishu Progress Delivery
 
-The plugin does not use direct Feishu app credentials or native Feishu API calls for progress delivery.
+For Feishu, the plugin sends and updates a single interactive card through the Feishu Open API.
 
-When the channel is `feishu` and the plugin has a `messageId` from a previous send, it first tries:
+- Initial progress uses `msg_type: "interactive"` send.
+- Subsequent progress updates use `PATCH /open-apis/im/v1/messages/{messageId}`.
+- The plugin reads Feishu credentials from the existing OpenClaw channel config, including account-scoped config, and does not require a separate plugin credential prompt.
 
-```bash
-openclaw message edit --channel feishu --target <target> --message-id <messageId> --message "<text>"
-```
-
-If OpenClaw reports that message editing is unsupported for that message, the plugin falls back to:
-
-1. `openclaw message send ...`
-2. `openclaw message delete ...` for the old progress message
-
-This keeps delivery inside OpenClaw and avoids any plugin-managed Feishu credentials.
+If native Feishu card delivery fails, the plugin may still fall back to OpenClaw message delivery, but the preferred path is the native single-card update flow.
 
 ## Error Catalog
 
