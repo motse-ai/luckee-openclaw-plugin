@@ -992,7 +992,7 @@ async function updateFeishuCardNative(
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ content: JSON.stringify(card) }),
+        body: JSON.stringify({ msg_type: "interactive", content: JSON.stringify(card) }),
       }
     );
     const bodyText = await res.text();
@@ -1125,18 +1125,132 @@ export default function register(api: any) {
 
         timeout: Type.Optional(Type.Number()),
       }),
-      async execute(_id: string, params: any) {
+      async execute(_id: string, params: any, ctx?: any) {
+        const query = String(params.query ?? "").trim();
+        const channel = ctx ? String(ctx.channelId || ctx.channel || "").trim() : "";
+        const target = ctx ? String(ctx.to || ctx.from || ctx.senderId || "").trim() : "";
+        const canPush = Boolean(channel && target && PUSH_CAPABLE_CHANNELS.has(channel));
+
+        if (!canPush) {
+          try {
+            const output = await executeLuckee(api, params);
+            api.logger?.info?.(
+              `[luckee] tool success: query="${safePreview(query)}" outputChars=${output.length}`
+            );
+            return { content: [{ type: "text", text: output }] };
+          } catch (err: any) {
+            api.logger?.error?.(
+              `[luckee] tool failed: query="${safePreview(query)}" error=${String(err?.message || err)}`
+            );
+            throw err;
+          }
+        }
+
         try {
-          const output = await executeLuckee(api, params);
+          const runtimeCfg: LuckeeConfig =
+            api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
+          await ensureTokenStoreLoaded(api, runtimeCfg);
+          if (params?.token && String(params.token).trim()) {
+            persistedDefaultToken = String(params.token).trim();
+            await writeTokenStore(runtimeCfg);
+            api.logger?.info?.("[luckee] persisted default token from tool invocation.");
+          }
+
+          const senderKey = getSenderKey(ctx);
+          const storedToken =
+            tokenBySender.get(senderKey) ||
+            persistedTokenBySenderHash.get(hashSenderKey(senderKey));
+          const effectiveToken =
+            params.token || storedToken || runtimeCfg.defaultToken || persistedDefaultToken;
+
+          const { cfg, args } = resolveLuckeeInvocation(api, {
+            ...params,
+            token: effectiveToken,
+          });
+          logLuckeeInvocation(api, "tool", {
+            query: safePreview(query),
+            hasToken: Boolean(effectiveToken),
+            token: redactToken(String(effectiveToken || "")),
+            channel,
+            streaming: true,
+          });
+
+          const binaryPath = await resolveLuckeeBinaryOrThrow(api, cfg);
+          api.logger?.info?.(`[luckee] tool resolved binary: ${binaryPath}`);
           api.logger?.info?.(
-            `[luckee] tool success: query="${safePreview(String(params.query ?? ""))}" outputChars=${output.length}`
+            `[luckee] tool cli args: ${JSON.stringify(redactCliArgs(args))}`
           );
-          return { content: [{ type: "text", text: output }] };
+
+          const flushEveryMs = Math.max(300, Number(runtimeCfg.streamFlushMs ?? 1000));
+          let progressMessageId: string | undefined;
+          let accumulated = "";
+          let loadingTick = 0;
+          const abortHandle: { kill: () => void } = { kill: () => {} };
+
+          if (channel === "feishu") {
+            const initText = `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
+            const initResult = await sendFeishuCardNative(api, ctx, initText);
+            if (initResult.ok && initResult.messageId) {
+              progressMessageId = initResult.messageId;
+              api.logger?.info?.(
+                `[luckee] feishu tool initial card sent messageId=${initResult.messageId}`
+              );
+            }
+          }
+
+          const processKey = getSenderKey(ctx);
+          activeProcesses.set(processKey, { kill: () => abortHandle.kill(), query });
+
+          const pushProgress = async (chunk?: string) => {
+            if (chunk) {
+              accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
+              if (accumulated.length > 3500) {
+                accumulated = `...(truncated old output)\n${accumulated.slice(-3200)}`;
+              }
+            }
+            if (!accumulated && !progressMessageId) return;
+
+            const displayText = accumulated
+              ? normalizeWrappedUrls(accumulated)
+              : `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
+            const progressText = withProgressFooter(displayText, loadingTick);
+            loadingTick += 1;
+
+            const edited = await sendProgressMessageEditable(
+              api, ctx, progressText, progressMessageId
+            );
+            if (edited.ok) {
+              progressMessageId = edited.messageId || progressMessageId;
+            }
+          };
+
+          try {
+            const output = await runCommandStreaming(
+              binaryPath,
+              args,
+              async (chunk) => pushProgress(chunk),
+              flushEveryMs,
+              async () => pushProgress(),
+              abortHandle
+            );
+
+            if (progressMessageId) {
+              const finalText = withDoneFooter(
+                normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)
+              );
+              await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
+            }
+
+            api.logger?.info?.(
+              `[luckee] tool success(streamed): query="${safePreview(query)}" outputChars=${output.length}`
+            );
+            return { content: [{ type: "text", text: output }] };
+          } finally {
+            activeProcesses.delete(processKey);
+          }
         } catch (err: any) {
           api.logger?.error?.(
-            `[luckee] tool failed: query="${safePreview(String(params.query ?? ""))}" error=${String(
-              err?.message || err
-            )}`
+            `[luckee] tool failed: query="${safePreview(query)}" error=${String(err?.message || err)}`
           );
           throw err;
         }
@@ -1405,7 +1519,7 @@ export default function register(api: any) {
             args,
             async (chunk) => pushProgress(chunk),
             flushEveryMs,
-            async () => pushProgress(),
+            undefined,
             abortHandle
           );
 
