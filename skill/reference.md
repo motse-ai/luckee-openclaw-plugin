@@ -6,7 +6,7 @@ All settings live under `plugins.entries["luckee-tool"].config` in `~/.openclaw/
 
 | Key | Type | Default | Required | Description |
 |-----|------|---------|----------|-------------|
-| `binaryPath` | string | `luckee-cli` | No | Path to the luckee CLI binary |
+| `binaryPath` | string | `luckee` | No | Path to the luckee CLI binary |
 | `defaultUrl` | string | — | No | Legacy/advanced API endpoint override (normally not needed) |
 | `defaultUserId` | string | — | No | Legacy/advanced default user ID (normally not needed) |
 | `defaultLanguage` | string | `CN` | No | Query language code |
@@ -27,7 +27,7 @@ All settings live under `plugins.entries["luckee-tool"].config` in `~/.openclaw/
         "source": "/path/to/luckee-openclaw-plugin/plugin",
         "enabled": true,
         "config": {
-          "binaryPath": "luckee-cli",
+          "binaryPath": "luckee",
           "defaultLanguage": "CN",
           "defaultToken": "sk_live_xxxx",
           "defaultTimeout": 90,
@@ -93,8 +93,8 @@ Stored at `~/.openclaw/secrets/luckee-tool/tokens.json` with `0600` permissions.
 The plugin resolves the luckee CLI binary in this order:
 
 1. `config.binaryPath` (if set and non-empty)
-2. `luckee-cli`
-3. `luckee`
+2. `luckee`
+3. `luckee-cli`
 
 For each candidate, the plugin runs `<binary> --version` and checks:
 - Exit code 0, or
@@ -103,7 +103,7 @@ For each candidate, the plugin runs `<binary> --version` and checks:
 If all candidates fail and `autoInstallCli` is true (default), the plugin attempts:
 
 ```bash
-<python> -m pip install --upgrade 'luckee-cli>=0.1.2026031307,<0.2.0'
+<python> -m pip install --upgrade 'luckee-cli>=0.1.0'
 ```
 
 Python candidates tried: `config.pythonPath` (if set), then `python3`, `python`, `py`.
@@ -132,7 +132,7 @@ If native Feishu card delivery fails, the plugin may still fall back to OpenClaw
 |-------|-------|----------|
 | `Missing query.` | Tool called without `query` parameter | Provide a non-empty `query` string |
 | `Not logged in` / auth-related error | Local Luckee session is missing or expired | Run `luckee login` (or rerun a normal `luckee` command to trigger auto-login), complete browser authorization, then retry |
-| `luckee CLI is required but was not found` | No luckee binary found and auto-install failed | Run `pip install --upgrade 'luckee-cli>=0.1.2026031307,<0.2.0'` manually, or set `binaryPath` |
+| `luckee CLI is required but was not found` | No luckee binary found and auto-install failed | Run `pip install --upgrade 'luckee-cli>=0.1.0'` manually, or set `binaryPath` |
 | `luckee exited with code <N>` | CLI returned non-zero exit | Check stderr in the error message; common causes: invalid token, network timeout, bad query |
 | Auth expired during runtime | Login session timed out | Re-run `luckee login` and retry the query |
 | `plugin id mismatch (manifest uses "luckee-tool", entry hints "luckee-openclaw-plugin")` | Config key doesn't match the plugin manifest ID | Run `openclaw config unset plugins.entries.luckee-openclaw-plugin` and re-register |

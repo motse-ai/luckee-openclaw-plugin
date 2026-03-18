@@ -31,7 +31,7 @@ skill/        ClawHub 技能（SKILL.md + reference.md，供 AI 代理使用）
 ### 1. 安装 luckee CLI
 
 ```bash
-pip install --upgrade 'luckee-cli>=0.1.2026031307,<0.2.0'
+pip install --upgrade 'luckee-cli>=0.1.0'
 ```
 
 ### 2. 将插件注册到 OpenClaw
@@ -69,7 +69,7 @@ clawhub install luckee-skill
 
 | 配置键 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `binaryPath` | string | `luckee-cli` | luckee CLI 二进制文件路径 |
+| `binaryPath` | string | `luckee` | luckee CLI 二进制文件路径 |
 | `defaultUrl` | string | — | **必填。** API 端点地址 |
 | `defaultUserId` | string | — | **必填。** 默认用户 ID |
 | `defaultLanguage` | string | `CN` | 查询语言 |

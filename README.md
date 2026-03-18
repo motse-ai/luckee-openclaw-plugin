@@ -31,7 +31,7 @@ skill/        ClawHub skill (SKILL.md + reference.md for AI agents)
 ### 1. Install the luckee CLI
 
 ```bash
-pip install --upgrade 'luckee-cli>=0.1.2026031307,<0.2.0'
+pip install --upgrade 'luckee-cli>=0.1.0'
 ```
 
 ### 2. Register the plugin with OpenClaw
@@ -69,7 +69,7 @@ All settings live under `plugins.entries["luckee-tool"].config` in your OpenClaw
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `binaryPath` | string | `luckee-cli` | Path to the luckee CLI binary |
+| `binaryPath` | string | `luckee` | Path to the luckee CLI binary |
 | `defaultUrl` | string | — | **Required.** API endpoint URL |
 | `defaultUserId` | string | — | **Required.** Default user ID |
 | `defaultLanguage` | string | `CN` | Query language |

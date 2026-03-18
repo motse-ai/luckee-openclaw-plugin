@@ -421,7 +421,7 @@ async function executeLuckee(api: any, params: any): Promise<string> {
 }
 
 function getLuckeeBinaryCandidates(cfg: LuckeeConfig): string[] {
-  const raw = [cfg.binaryPath?.trim(), "luckee-cli", "luckee"].filter(
+  const raw = [cfg.binaryPath?.trim(), "luckee", "luckee-cli"].filter(
     (v): v is string => Boolean(v)
   );
   return [...new Set(raw)];
@@ -474,7 +474,7 @@ async function resolveLuckeeBinaryOrThrow(
   // PATH-based probe failed; check common pip script directories
   const scriptDirs = await getPipScriptsDirs(cfg);
   for (const dir of scriptDirs) {
-    for (const name of ["luckee-cli", "luckee"]) {
+    for (const name of ["luckee", "luckee-cli"]) {
       const fullPath = path.join(dir, name);
       if (candidates.includes(fullPath)) continue;
       try {
@@ -515,7 +515,7 @@ async function resolveLuckeeBinaryOrThrow(
       const scriptDirs = await getPipScriptsDirs(cfg);
       api.logger?.info?.(`[luckee] scanning pip script dirs: ${JSON.stringify(scriptDirs)}`);
       for (const dir of scriptDirs) {
-        for (const name of ["luckee-cli", "luckee"]) {
+        for (const name of ["luckee", "luckee-cli"]) {
           const fullPath = path.join(dir, name);
           try {
             const result = await runCommandDetailed(fullPath, ["--version"]);

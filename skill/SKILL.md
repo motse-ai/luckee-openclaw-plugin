@@ -29,14 +29,14 @@ This single command fetches the plugin and installs its dependencies. Do **not**
 
 ### 2. Verify and configure the luckee CLI binary path
 
-After install, `luckee-cli` (the Python package) may have been placed in a directory that is **not** on the gateway process's PATH (e.g. `~/.local/bin`). You **must** locate the actual binary and set `binaryPath` explicitly:
+After install, `luckee-cli` (the Python package) may have been placed in a directory that is **not** on the gateway process's PATH (e.g. `~/.local/bin`). The plugin should use the `luckee` binary by default, so you **must** locate the actual binary and set `binaryPath` explicitly if needed:
 
 ```bash
 # Find where the binary was installed
-which luckee-cli 2>/dev/null || which luckee 2>/dev/null || python3 -c "import sysconfig; print(sysconfig.get_path('scripts', sysconfig.get_preferred_scheme('user')))" 2>/dev/null
+which luckee 2>/dev/null || which luckee-cli 2>/dev/null || python3 -c "import sysconfig; print(sysconfig.get_path('scripts', sysconfig.get_preferred_scheme('user')))" 2>/dev/null
 ```
 
-Check the discovered directory (e.g. `/home/node/.local/bin/`) for a file named `luckee-cli` or `luckee`. Then set the full path:
+Check the discovered directory (e.g. `/home/node/.local/bin/`) for a file named `luckee` or `luckee-cli`. Then set the full path:
 
 ```bash
 openclaw config set plugins.entries.luckee-tool.config.binaryPath "/full/path/to/luckee"
@@ -126,7 +126,7 @@ This is the most common issue. Even when `luckee-cli` is installed, the gateway 
 **Step 1 — Locate the binary:**
 
 ```bash
-which luckee-cli 2>/dev/null || which luckee 2>/dev/null
+which luckee 2>/dev/null || which luckee-cli 2>/dev/null
 ```
 
 If that returns nothing, check common pip script directories:
@@ -139,9 +139,7 @@ python3 -c "import sysconfig; print(sysconfig.get_path('scripts', sysconfig.get_
 **Step 2 — If not installed, install it:**
 
 ```bash
-python -m pip install --upgrade \
-  --index-url https://test.pypi.org/simple/ \
-  luckee-cli
+python -m pip install --upgrade 'luckee-cli>=0.1.0'
 ```
 
 Then re-run Step 1 to find where it was placed.
