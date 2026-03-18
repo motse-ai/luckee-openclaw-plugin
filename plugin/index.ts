@@ -950,12 +950,52 @@ async function sendFeishuCardNative(
   }
 }
 
-function resolveFeishuCreds(api: any): { appId?: string; appSecret?: string } {
-  const feishu = api?.config?.channels?.feishu ?? {};
-  return {
-    appId: feishu.appId,
-    appSecret: feishu.appSecret,
+function resolveFeishuCreds(api: any): { appId?: string; appSecret?: string; source?: string } {
+  const cfg: LuckeeConfig =
+    api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
+  const channels = api?.config?.channels ?? {};
+
+  const clean = (v: any): string | undefined => {
+    const s = typeof v === "string" ? v.trim() : "";
+    if (!s) return undefined;
+    if (s === "__OPENCLAW_REDACTED__") return undefined;
+    if (s === "REDACTED") return undefined;
+    return s;
   };
+
+  const candidates = [
+    {
+      source: "plugins.entries.luckee-tool.config",
+      appId: clean(cfg.feishuAppId),
+      appSecret: clean(cfg.feishuAppSecret),
+    },
+    {
+      source: "channels.feishu",
+      appId: clean(channels?.feishu?.appId),
+      appSecret: clean(channels?.feishu?.appSecret),
+    },
+    {
+      source: "channels.entries.feishu",
+      appId: clean(channels?.entries?.feishu?.appId),
+      appSecret: clean(channels?.entries?.feishu?.appSecret),
+    },
+    {
+      source: "channels.entries.feishu.config",
+      appId: clean(channels?.entries?.feishu?.config?.appId),
+      appSecret: clean(channels?.entries?.feishu?.config?.appSecret),
+    },
+  ];
+
+  for (const c of candidates) {
+    if (c.appId && c.appSecret) {
+      return c;
+    }
+  }
+
+  api.logger?.warn?.(
+    `[luckee] feishu credentials not found in known paths; channels keys=${Object.keys(channels || {}).join(",") || "none"}`
+  );
+  return {};
 }
 
 async function getFeishuTenantToken(api: any): Promise<string | null> {
@@ -964,11 +1004,11 @@ async function getFeishuTenantToken(api: any): Promise<string | null> {
     return feishuTokenCache.token;
   }
 
-  const { appId, appSecret } = resolveFeishuCreds(api);
+  const { appId, appSecret, source } = resolveFeishuCreds(api);
   if (!appId || !appSecret) {
     api.logger?.warn?.(
       `[luckee] feishu tenant token: missing credentials (hasAppId=${Boolean(appId)} hasAppSecret=${Boolean(appSecret)}). ` +
-      `Set channels.feishu.appId and channels.feishu.appSecret in openclaw config.`
+      `Set channels.feishu.appId/channels.feishu.appSecret or plugins.entries.luckee-tool.config.feishuAppId/feishuAppSecret.`
     );
     return null;
   }
@@ -1001,7 +1041,9 @@ async function getFeishuTenantToken(api: any): Promise<string | null> {
       token: String(data.tenant_access_token),
       expireAt: now + ttlSec * 1000,
     };
-    api.logger?.info?.(`[luckee] feishu tenant token: obtained, expires in ${ttlSec}s`);
+    api.logger?.info?.(
+      `[luckee] feishu tenant token: obtained from ${source || "unknown"}, expires in ${ttlSec}s`
+    );
     return feishuTokenCache.token;
   } catch (err: any) {
     api.logger?.warn?.(
