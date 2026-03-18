@@ -2,7 +2,7 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
-一个 [OpenClaw](https://openclaw.ai) 插件，将 **luckee CLI** 封装为 AI 可调用的工具和聊天命令。AI 助手可以通过 OpenClaw 连接的任意渠道（Telegram、WhatsApp、Discord、飞书、Slack 等）查询领星数据。
+一个 [OpenClaw](https://openclaw.ai) 插件，将 **luckee CLI** 封装为 AI 可调用的工具和聊天命令。AI 助手可以通过 OpenClaw 连接的任意渠道（Telegram、WhatsApp、Discord、飞书、Slack 等）执行产品数据查询。
 
 ## 仓库结构
 
@@ -13,7 +13,7 @@ skill/        ClawHub 技能（SKILL.md + reference.md，供 AI 代理使用）
 
 ## 功能特性
 
-- **`luckee_query` 工具** — AI 代理可以通过编程方式调用领星查询。
+- **`luckee_query` 工具** — AI 代理可以通过编程方式调用查询。
 - **`/luckee` 命令** — 用户可在任意聊天渠道中直接执行查询。
 - **流式输出** — 在支持推送的渠道上实时更新进度，支持消息编辑。
 - **按发送者管理 Token** — Token 按用户安全存储，跨重启持久化。
@@ -47,7 +47,6 @@ openclaw plugins install ./luckee-openclaw-plugin/plugin
 ```bash
 openclaw config set plugins.entries.luckee-tool.config.defaultUrl "<你的API地址>"
 openclaw config set plugins.entries.luckee-tool.config.defaultUserId "<你的用户ID>"
-openclaw config set plugins.entries.luckee-tool.config.defaultLingxingAccount "<领星账号>"
 ```
 
 然后重启网关：
@@ -73,7 +72,6 @@ clawhub install luckee-skill
 | `binaryPath` | string | `luckee-cli` | luckee CLI 二进制文件路径 |
 | `defaultUrl` | string | — | **必填。** API 端点地址 |
 | `defaultUserId` | string | — | **必填。** 默认用户 ID |
-| `defaultLingxingAccount` | string | — | **必填。** 领星账号标识 |
 | `defaultLanguage` | string | `CN` | 查询语言 |
 | `defaultToken` | string | — | 默认 API Token |
 | `tokenStorePath` | string | 自动 | Token 持久化存储路径 |

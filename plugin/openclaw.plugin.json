@@ -2,7 +2,7 @@
   "id": "luckee-tool",
   "name": "Luckee Tool",
   "version": "0.1.1",
-  "description": "Expose luckee CLI as an OpenClaw tool and chat command for querying Lingxing data",
+  "description": "Expose luckee CLI as an OpenClaw tool and chat command for product data queries",
   "repository": "https://github.com/motse-ai/luckee-openclaw-plugin",
   "requires": {
     "bins": ["luckee-cli"],
@@ -32,10 +32,6 @@
         "type": "string",
         "default": "CN",
         "description": "Query language code"
-      },
-      "defaultLingxingAccount": {
-        "type": "string",
-        "description": "Lingxing account identifier (required)"
       },
       "defaultToken": {
         "type": "string",

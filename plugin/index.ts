@@ -10,7 +10,7 @@ type LuckeeConfig = {
   defaultUrl?: string;
   defaultUserId?: string;
   defaultLanguage?: string;
-  defaultLingxingAccount?: string;
+
   defaultToken?: string;
   tokenStorePath?: string;
   defaultTimeout?: number;
@@ -351,7 +351,6 @@ function resolveLuckeeInvocation(api: any, params: any): {
   const url = cfg.defaultUrl;
   const userId = params.userId || cfg.defaultUserId;
   const language = params.language || cfg.defaultLanguage || "CN";
-  const lingxingAccount = params.lingxingAccount || cfg.defaultLingxingAccount;
   const token = params.token || cfg.defaultToken || persistedDefaultToken;
   const timeout = String(params.timeout || cfg.defaultTimeout || 90);
 
@@ -368,7 +367,6 @@ function resolveLuckeeInvocation(api: any, params: any): {
   if (url) args.push("--url", url);
   if (userId) args.push("--user-id", userId);
   args.push("--language", language);
-  if (lingxingAccount) args.push("--config", JSON.stringify({ lingxing_account: lingxingAccount }));
   args.push("--query", query, "--timeout", timeout);
   if (token) args.push("--token", String(token));
 
@@ -1124,7 +1122,7 @@ export default function register(api: any) {
         token: Type.Optional(Type.String()),
         userId: Type.Optional(Type.String()),
         language: Type.Optional(Type.String()),
-        lingxingAccount: Type.Optional(Type.String()),
+
         timeout: Type.Optional(Type.Number()),
       }),
       async execute(_id: string, params: any) {
@@ -1239,7 +1237,7 @@ export default function register(api: any) {
                 text:
                   "It seems the OAuth login flow isn't working properly in this environment (the redirect_uri is empty).\n" +
                   urlNote +
-                  "\n**Alternative option:** Do you have a Luckee/Lingxing API token? If so, you can set it directly without browser login:\n\n" +
+                  "\n**Alternative option:** Do you have a Luckee API token? If so, you can set it directly without browser login:\n\n" +
                   "```\n/luckee token <your_token>\n```\n\n" +
                   "Or I can configure it via:\n\n" +
                   "```\nopenclaw config set plugins.entries.luckee-tool.config.defaultToken \"<your_token>\"\n```\n\n" +

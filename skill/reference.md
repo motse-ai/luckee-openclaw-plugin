@@ -10,7 +10,6 @@ All settings live under `plugins.entries["luckee-tool"].config` in `~/.openclaw/
 | `defaultUrl` | string | — | No | Legacy/advanced API endpoint override (normally not needed) |
 | `defaultUserId` | string | — | No | Legacy/advanced default user ID (normally not needed) |
 | `defaultLanguage` | string | `CN` | No | Query language code |
-| `defaultLingxingAccount` | string | — | No | Legacy/advanced Lingxing account identifier (normally not needed) |
 | `defaultToken` | string | — | No | Default API authentication token |
 | `tokenStorePath` | string | `~/.openclaw/secrets/luckee-tool/tokens.json` | No | Path to the persisted token store file |
 | `defaultTimeout` | number | `90` | No | Query timeout in seconds |
@@ -115,7 +114,7 @@ After auto-install, the binary probe runs again. Results are cached per configur
 
 - `luckee login` starts browser-based authorization explicitly.
 - Running normal `luckee` commands also checks session status and prompts browser authorization automatically when not logged in.
-- During support flows, do not ask users for API URL, User ID, or Lingxing account credentials.
+- During support flows, do not ask users for API URL or User ID.
 
 ## Feishu Card Native Updates (Optional)
 

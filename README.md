@@ -2,7 +2,7 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
-An [OpenClaw](https://openclaw.ai) plugin that exposes the **luckee CLI** as an AI-callable tool and chat command. It lets AI assistants query Lingxing data through any OpenClaw-connected channel (Telegram, WhatsApp, Discord, Feishu, Slack, and more).
+An [OpenClaw](https://openclaw.ai) plugin that exposes the **luckee CLI** as an AI-callable tool and chat command. It lets AI assistants run product data queries through any OpenClaw-connected channel (Telegram, WhatsApp, Discord, Feishu, Slack, and more).
 
 ## Repo Structure
 
@@ -13,7 +13,7 @@ skill/        ClawHub skill (SKILL.md + reference.md for AI agents)
 
 ## Features
 
-- **`luckee_query` tool** — AI agents can call Lingxing queries programmatically.
+- **`luckee_query` tool** — AI agents can call queries programmatically.
 - **`/luckee` command** — Users can run queries directly from any chat channel.
 - **Streaming output** — Real-time progress updates on push-capable channels with editable messages.
 - **Per-sender token management** — Tokens are stored securely per user and persisted across restarts.
@@ -47,7 +47,6 @@ openclaw plugins install ./luckee-openclaw-plugin/plugin
 ```bash
 openclaw config set plugins.entries.luckee-tool.config.defaultUrl "<your-api-url>"
 openclaw config set plugins.entries.luckee-tool.config.defaultUserId "<your-user-id>"
-openclaw config set plugins.entries.luckee-tool.config.defaultLingxingAccount "<account>"
 ```
 
 Then restart the gateway:
@@ -73,7 +72,6 @@ All settings live under `plugins.entries["luckee-tool"].config` in your OpenClaw
 | `binaryPath` | string | `luckee-cli` | Path to the luckee CLI binary |
 | `defaultUrl` | string | — | **Required.** API endpoint URL |
 | `defaultUserId` | string | — | **Required.** Default user ID |
-| `defaultLingxingAccount` | string | — | **Required.** Lingxing account identifier |
 | `defaultLanguage` | string | `CN` | Query language |
 | `defaultToken` | string | — | Default API token |
 | `tokenStorePath` | string | auto | Path to the persisted token store |

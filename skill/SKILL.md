@@ -1,6 +1,6 @@
 ---
 name: luckee-skill
-description: Install and operate the luckee-tool OpenClaw plugin for querying Lingxing data. Use when the user mentions luckee, Lingxing, ASIN lookup, product data queries, or wants to set up the luckee plugin.
+description: Install and operate the luckee-tool OpenClaw plugin for product data queries. Use when the user mentions luckee, ASIN lookup, product data queries, or wants to set up the luckee plugin.
 ---
 
 # Luckee Skill
@@ -65,7 +65,7 @@ openclaw plugins info luckee-tool
 openclaw health
 ```
 
-Confirm the plugin shows as loaded and the gateway is healthy. Do not ask the user for API URL, User ID, or Lingxing account details.
+Confirm the plugin shows as loaded and the gateway is healthy. Do not ask the user for API URL or User ID details.
 
 ## Usage
 
@@ -203,7 +203,7 @@ openclaw gateway restart
 - **Never** log or display full tokens. Always redact to `sk_x***xx` format.
 - All install/config operations are idempotent — safe to re-run.
 - Do **not** overwrite unrelated config keys when setting luckee-tool config.
-- Never request API URL, User ID, or Lingxing account credentials from users during normal setup/query flows.
+- Never request API URL or User ID from users during normal setup/query flows.
 
 ## Reference
 
