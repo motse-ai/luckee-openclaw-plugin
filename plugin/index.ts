@@ -17,6 +17,8 @@ type LuckeeConfig = {
   streamFlushMs?: number;
   autoInstallCli?: boolean;
   pythonPath?: string;
+  feishuAppId?: string;
+  feishuAppSecret?: string;
 };
 
 const LUCKEE_CLI_PIP_SPEC = "luckee-cli";
