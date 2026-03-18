@@ -89,6 +89,7 @@ type StreamingRaceResult =
 
 type InteractiveLuckeeResult =
   | { kind: "done"; output: string; usedPush: boolean }
+  | { kind: "stopped"; output: string; usedPush: boolean }
   | { kind: "auth-pending"; message: string; usedPush: boolean };
 
 const activeProcesses = new Map<string, TrackedProcess>();
@@ -115,6 +116,17 @@ function safePreview(text: string, maxLen = 200): string {
   const t = String(text || "").trim();
   if (!t) return "";
   return t.length > maxLen ? `${t.slice(0, maxLen)}...` : t;
+}
+
+function createLuckeeStoppedError(): Error & { code: string; luckeeStopped: true } {
+  const err = new Error("Luckee query stopped.");
+  (err as Error & { code: string; luckeeStopped: true }).code = "LUCKEE_STOPPED";
+  (err as Error & { code: string; luckeeStopped: true }).luckeeStopped = true;
+  return err as Error & { code: string; luckeeStopped: true };
+}
+
+function isLuckeeStoppedError(err: any): boolean {
+  return err?.code === "LUCKEE_STOPPED" || err?.luckeeStopped === true;
 }
 
 function logLuckeeInvocation(api: any, origin: "tool" | "command", info: Record<string, any>): void {
@@ -208,11 +220,23 @@ function getSenderKey(ctx: any): string {
   return `${channel}|${account}|${sender}`;
 }
 
-function runCommand(command: string, args: string[]): Promise<string> {
+function runCommand(
+  command: string,
+  args: string[],
+  abortHandle?: { kill: () => void }
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    let aborted = false;
+    if (abortHandle) {
+      abortHandle.kill = () => {
+        aborted = true;
+        try { child.kill("SIGTERM"); } catch {}
+        setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 2000);
+      };
+    }
 
     let stdout = "";
     let stderr = "";
@@ -228,6 +252,10 @@ function runCommand(command: string, args: string[]): Promise<string> {
     child.on("error", (err) => reject(err));
 
     child.on("close", (code) => {
+      if (aborted) {
+        reject(createLuckeeStoppedError());
+        return;
+      }
       if (code === 0) {
         const out = stdout.trim();
         const err = stderr.trim();
@@ -463,7 +491,24 @@ async function executeLuckee(api: any, params: any): Promise<string> {
   api.logger?.info?.(
     `[luckee] ${origin} cli args: ${JSON.stringify(redactCliArgs(args))}`
   );
-  return runCommand(binaryPath, args);
+  const senderKey = params?.ctx ? getSenderKey(params.ctx) : "";
+  const abortHandle: { kill: () => void } = { kill: () => {} };
+  if (senderKey) {
+    const interruptedExisting = stopTrackedProcess(senderKey);
+    if (interruptedExisting.stopped) {
+      api.logger?.info?.(
+        `[luckee] ${origin} interrupted prior ${interruptedExisting.kind || "process"} for sender=${hashSenderKey(senderKey).slice(0, 8)} query="${safePreview(interruptedExisting.query || "", 80)}"`
+      );
+    }
+    activeProcesses.set(senderKey, { kill: () => abortHandle.kill(), query: String(params.query ?? "").trim() });
+  }
+  try {
+    return await runCommand(binaryPath, args, senderKey ? abortHandle : undefined);
+  } finally {
+    if (senderKey) {
+      activeProcesses.delete(senderKey);
+    }
+  }
 }
 
 function getLuckeeBinaryCandidates(cfg: LuckeeConfig): string[] {
@@ -658,8 +703,10 @@ function runCommandStreaming(
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    let aborted = false;
     if (abortHandle) {
       abortHandle.kill = () => {
+        aborted = true;
         try { child.kill("SIGTERM"); } catch {}
         setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 2000);
       };
@@ -715,6 +762,10 @@ function runCommandStreaming(
           if (onTick) await onTick();
         })
         .then(() => {
+          if (aborted) {
+            reject(createLuckeeStoppedError());
+            return;
+          }
           if (code === 0) {
             const out = stdout.trim();
             const err = stderr.trim();
@@ -847,6 +898,13 @@ function resolveMessageTarget(ctx: any): string {
   return String(ctx.to || ctx.from || ctx.senderId || "").trim();
 }
 
+function canPushLuckeeUpdates(ctx?: any): boolean {
+  if (!ctx) return false;
+  const channel = String(ctx.channelId || ctx.channel || "").trim();
+  const target = resolveMessageTarget(ctx);
+  return Boolean(channel && target && PUSH_CAPABLE_CHANNELS.has(channel));
+}
+
 function buildMessageArgs(ctx: any, text: string): string[] {
   const channel = String(ctx.channelId || ctx.channel || "").trim();
   const target = resolveMessageTarget(ctx);
@@ -916,7 +974,7 @@ function buildFeishuCard(text: string, options: FeishuCardOptions = {}): Record<
         {
           tag: "hr",
         },
-        stopButton,
+        //stopButton,
       ],
     },
   };
@@ -1682,8 +1740,7 @@ async function executeLuckeeInteractive(
 ): Promise<InteractiveLuckeeResult> {
   const query = String(params.query ?? "").trim();
   const channel = ctx ? String(ctx.channelId || ctx.channel || "").trim() : "";
-  const target = ctx ? resolveMessageTarget(ctx) : "";
-  const canPush = Boolean(channel && target && PUSH_CAPABLE_CHANNELS.has(channel));
+  const canPush = canPushLuckeeUpdates(ctx);
   const runtimeCfg: LuckeeConfig =
     api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
 
@@ -1698,17 +1755,28 @@ async function executeLuckeeInteractive(
     params.token || storedToken || runtimeCfg.defaultToken || persistedDefaultToken;
 
   if (!canPush) {
-    const output = await executeLuckee(api, {
-      ...params,
-      token: effectiveToken,
-      origin,
-      persistProvidedToken:
-        origin === "tool" && Boolean(params?.token && String(params.token).trim()),
-    });
-    api.logger?.info?.(
-      `[luckee] ${origin} success: query="${safePreview(query)}" outputChars=${output.length}`
-    );
-    return { kind: "done", output, usedPush: false };
+    try {
+      const output = await executeLuckee(api, {
+        ...params,
+        token: effectiveToken,
+        origin,
+        ctx,
+        persistProvidedToken:
+          origin === "tool" && Boolean(params?.token && String(params.token).trim()),
+      });
+      api.logger?.info?.(
+        `[luckee] ${origin} success: query="${safePreview(query)}" outputChars=${output.length}`
+      );
+      return { kind: "done", output, usedPush: false };
+    } catch (err: any) {
+      if (isLuckeeStoppedError(err)) {
+        api.logger?.info?.(
+          `[luckee] ${origin} stopped: query="${safePreview(query)}"`
+        );
+        return { kind: "stopped", output: `已停止查询: ${safePreview(query, 50)}`, usedPush: false };
+      }
+      throw err;
+    }
   }
 
   try {
@@ -1865,6 +1933,12 @@ async function executeLuckeeInteractive(
       }
 
       if (result.kind === "error") {
+        if (isLuckeeStoppedError(result.error)) {
+          api.logger?.info?.(
+            `[luckee] ${origin} stopped(streamed): query="${safePreview(query)}"`
+          );
+          return { kind: "stopped", output: `已停止查询: ${safePreview(query, 50)}`, usedPush: true };
+        }
         throw result.error;
       }
 
@@ -1899,6 +1973,35 @@ async function executeLuckeeInteractive(
   }
 }
 
+function buildDetachedLuckeeStartMessage(query: string): string {
+  return (
+    `已开始处理 Luckee 查询: ${safePreview(query, 50)}\n` +
+    "我会把进度和结果继续发到当前聊天。发送 `/luckee stop` 可随时停止。"
+  );
+}
+
+async function startLuckeeInteractiveDetached(
+  api: any,
+  params: any,
+  ctx: any,
+  origin: "tool" | "command"
+): Promise<string> {
+  const query = String(params?.query ?? "").trim();
+  void executeLuckeeInteractive(api, params, ctx, origin).catch(async (err: any) => {
+    const errMsg = String(err?.message || err || "");
+    const failText = `Luckee 查询失败: ${safePreview(errMsg, 200)}`;
+    api.logger?.error?.(
+      `[luckee] ${origin} detached failed: query="${safePreview(query)}" error=${safePreview(errMsg, 200)}`
+    );
+    try {
+      await sendProgressMessageEditable(api, ctx, failText);
+    } catch {
+      // Best effort only.
+    }
+  });
+  return buildDetachedLuckeeStartMessage(query);
+}
+
 export default function register(api: any) {
   api.registerCommand({
     name: "luckee",
@@ -1929,6 +2032,16 @@ export default function register(api: any) {
           return { text: savedText };
         }
 
+        if (canPushLuckeeUpdates(ctx)) {
+          const text = await startLuckeeInteractiveDetached(
+            api,
+            { query: parsed.query },
+            ctx,
+            "command"
+          );
+          return { text };
+        }
+
         const result = await executeLuckeeInteractive(
           api,
           { query: parsed.query },
@@ -1938,7 +2051,20 @@ export default function register(api: any) {
         if (result.kind === "auth-pending") {
           return { text: result.message };
         }
+        if (result.kind === "stopped") {
+          return result.usedPush ? {} : { text: result.output };
+        }
         return result.usedPush ? {} : { text: result.output };
+      }
+
+      if (canPushLuckeeUpdates(ctx)) {
+        const text = await startLuckeeInteractiveDetached(
+          api,
+          { query: parsed.query },
+          ctx,
+          "command"
+        );
+        return { text };
       }
 
       const result = await executeLuckeeInteractive(
@@ -1949,6 +2075,9 @@ export default function register(api: any) {
       );
       if (result.kind === "auth-pending") {
         return { text: result.message };
+      }
+      if (result.kind === "stopped") {
+        return result.usedPush ? {} : { text: result.output };
       }
       return result.usedPush ? {} : { text: result.output };
     },
@@ -1967,6 +2096,12 @@ export default function register(api: any) {
         timeout: Type.Optional(Type.Number()),
       }),
       async execute(_id: string, params: any, ctx?: any) {
+        if (canPushLuckeeUpdates(ctx)) {
+          const text = await startLuckeeInteractiveDetached(api, params, ctx, "tool");
+          return {
+            content: [{ type: "text", text }],
+          };
+        }
         const result = await executeLuckeeInteractive(api, params, ctx, "tool");
         return {
           content: [
