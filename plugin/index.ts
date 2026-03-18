@@ -950,7 +950,7 @@ async function sendFeishuCardNative(
   }
 }
 
-function resolveFeishuCreds(api: any): { appId?: string; appSecret?: string; source?: string } {
+async function resolveFeishuCreds(api: any): Promise<{ appId?: string; appSecret?: string; source?: string }> {
   const cfg: LuckeeConfig =
     api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
   const channels = api?.config?.channels ?? {};
@@ -992,6 +992,34 @@ function resolveFeishuCreds(api: any): { appId?: string; appSecret?: string; sou
     }
   }
 
+  const configPath =
+    process.env.OPENCLAW_CONFIG_PATH ||
+    process.env.OPENCLAW_CONFIG ||
+    path.join(os.homedir(), ".openclaw", "openclaw.json");
+  try {
+    const raw = await fs.readFile(configPath, "utf8");
+    const parsed = JSON.parse(raw);
+    const fileAppId = clean(parsed?.channels?.feishu?.appId);
+    const fileAppSecret = clean(parsed?.channels?.feishu?.appSecret);
+    if (fileAppId && fileAppSecret) {
+      api.logger?.info?.(
+        `[luckee] feishu credentials loaded from config file: ${configPath}`
+      );
+      return {
+        appId: fileAppId,
+        appSecret: fileAppSecret,
+        source: `file:${configPath}`,
+      };
+    }
+    api.logger?.warn?.(
+      `[luckee] feishu credentials not present in config file: ${configPath}`
+    );
+  } catch (err: any) {
+    api.logger?.warn?.(
+      `[luckee] failed reading feishu credentials from config file ${configPath}: ${String(err?.message || err)}`
+    );
+  }
+
   api.logger?.warn?.(
     `[luckee] feishu credentials not found in known paths; channels keys=${Object.keys(channels || {}).join(",") || "none"}`
   );
@@ -1004,7 +1032,7 @@ async function getFeishuTenantToken(api: any): Promise<string | null> {
     return feishuTokenCache.token;
   }
 
-  const { appId, appSecret, source } = resolveFeishuCreds(api);
+  const { appId, appSecret, source } = await resolveFeishuCreds(api);
   if (!appId || !appSecret) {
     api.logger?.warn?.(
       `[luckee] feishu tenant token: missing credentials (hasAppId=${Boolean(appId)} hasAppSecret=${Boolean(appSecret)}). ` +
