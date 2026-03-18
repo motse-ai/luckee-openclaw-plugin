@@ -850,10 +850,21 @@ async function sendFeishuCardNative(
 ): Promise<{ ok: boolean; messageId?: string }> {
   try {
     const token = await getFeishuTenantToken(api);
-    if (!token) return { ok: false };
+    if (!token) {
+      api.logger?.warn?.(
+        `[luckee] feishu card send: no tenant token available, cannot send card`
+      );
+      return { ok: false };
+    }
 
     const resolved = resolveFeishuReceiveId(ctx);
-    if (!resolved) return { ok: false };
+    if (!resolved) {
+      api.logger?.warn?.(
+        `[luckee] feishu card send: cannot resolve receiveId from ctx ` +
+        `(to=${ctx.to || ""} from=${ctx.from || ""} chatId=${ctx.chatId || ctx.chat_id || ""} senderId=${ctx.senderId || ""})`
+      );
+      return { ok: false };
+    }
 
     const card = buildFeishuCard(text);
     const cardJson = JSON.stringify(card);
@@ -952,26 +963,50 @@ async function getFeishuTenantToken(api: any): Promise<string | null> {
   }
 
   const { appId, appSecret } = resolveFeishuCreds(api);
-  if (!appId || !appSecret) return null;
+  if (!appId || !appSecret) {
+    api.logger?.warn?.(
+      `[luckee] feishu tenant token: missing credentials (hasAppId=${Boolean(appId)} hasAppSecret=${Boolean(appSecret)}). ` +
+      `Set channels.feishu.appId and channels.feishu.appSecret in openclaw config.`
+    );
+    return null;
+  }
 
-  const res = await fetch(
-    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+  try {
+    const res = await fetch(
+      "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+      }
+    );
+    if (!res.ok) {
+      api.logger?.warn?.(
+        `[luckee] feishu tenant token: HTTP ${res.status} from token endpoint`
+      );
+      return null;
     }
-  );
-  if (!res.ok) return null;
-  const data: any = await res.json();
-  if (!data || data.code !== 0 || !data.tenant_access_token) return null;
+    const data: any = await res.json();
+    if (!data || data.code !== 0 || !data.tenant_access_token) {
+      api.logger?.warn?.(
+        `[luckee] feishu tenant token: API error code=${data?.code} msg=${data?.msg || "unknown"}`
+      );
+      return null;
+    }
 
-  const ttlSec = Number(data.expire || 7200);
-  feishuTokenCache = {
-    token: String(data.tenant_access_token),
-    expireAt: now + ttlSec * 1000,
-  };
-  return feishuTokenCache.token;
+    const ttlSec = Number(data.expire || 7200);
+    feishuTokenCache = {
+      token: String(data.tenant_access_token),
+      expireAt: now + ttlSec * 1000,
+    };
+    api.logger?.info?.(`[luckee] feishu tenant token: obtained, expires in ${ttlSec}s`);
+    return feishuTokenCache.token;
+  } catch (err: any) {
+    api.logger?.warn?.(
+      `[luckee] feishu tenant token: fetch error: ${String(err?.message || err)}`
+    );
+    return null;
+  }
 }
 
 async function updateFeishuCardNative(
@@ -981,7 +1016,12 @@ async function updateFeishuCardNative(
 ): Promise<boolean> {
   try {
     const token = await getFeishuTenantToken(api);
-    if (!token) return false;
+    if (!token) {
+      api.logger?.warn?.(
+        `[luckee] feishu card PATCH: no tenant token, cannot update messageId=${messageId}`
+      );
+      return false;
+    }
 
     const card = buildFeishuCard(text);
     const res = await fetch(
@@ -1005,11 +1045,18 @@ async function updateFeishuCardNative(
     const ok = res.ok && data?.code === 0;
     if (!ok) {
       api.logger?.warn?.(
-        `[luckee] feishu native patch failed status=${res.status} body=${bodyText.slice(0, 500)}`
+        `[luckee] feishu card PATCH failed: messageId=${messageId} status=${res.status} body=${bodyText.slice(0, 500)}`
+      );
+    } else {
+      api.logger?.info?.(
+        `[luckee] feishu card PATCH ok: messageId=${messageId}`
       );
     }
     return ok;
-  } catch {
+  } catch (err: any) {
+    api.logger?.warn?.(
+      `[luckee] feishu card PATCH error: messageId=${messageId} err=${String(err?.message || err)}`
+    );
     return false;
   }
 }
@@ -1052,11 +1099,17 @@ async function sendProgressMessageEditable(
   const channel = String(ctx.channelId || ctx.channel || "").trim();
   const target = String(ctx.to || ctx.from || ctx.senderId || "").trim();
   if (!channel || !target || !PUSH_CAPABLE_CHANNELS.has(channel)) {
+    api.logger?.warn?.(
+      `[luckee] sendProgressMessageEditable: skipped (channel=${channel || "empty"} target=${target || "empty"} pushCapable=${PUSH_CAPABLE_CHANNELS.has(channel)})`
+    );
     return { ok: false, edited: false };
   }
 
   // --- EDIT mode: only try to update the existing message, never create new ones ---
   if (prevMessageId) {
+    api.logger?.info?.(
+      `[luckee] sendProgressMessageEditable: EDIT mode channel=${channel} messageId=${prevMessageId}`
+    );
     if (channel === "feishu") {
       const ok = await updateFeishuCardNative(api, prevMessageId, text);
       if (ok) return { ok: true, messageId: prevMessageId, edited: true };
@@ -1073,27 +1126,42 @@ async function sendProgressMessageEditable(
       "--json",
     ];
     const result = await runCommandDetailed("openclaw", editArgs);
-    if (result.code === 0) return { ok: true, messageId: prevMessageId, edited: true };
+    if (result.code === 0) {
+      api.logger?.info?.(
+        `[luckee] openclaw edit ok: messageId=${prevMessageId} channel=${channel}`
+      );
+      return { ok: true, messageId: prevMessageId, edited: true };
+    }
     api.logger?.warn?.(
-      `[luckee] edit failed for messageId=${prevMessageId} channel=${channel}`
+      `[luckee] all edit attempts failed: messageId=${prevMessageId} channel=${channel} ` +
+      `exitCode=${result.code} stderr=${(result.stderr || "").slice(0, 300)}`
     );
     return { ok: false, messageId: prevMessageId, edited: false };
   }
 
   // --- SEND mode: create the first message, try native card then openclaw fallback ---
+  api.logger?.info?.(
+    `[luckee] sendProgressMessageEditable: SEND mode channel=${channel} target=${target}`
+  );
   if (channel === "feishu") {
     const cardResult = await sendFeishuCardNative(api, ctx, text);
     if (cardResult.ok && cardResult.messageId) {
       return { ok: true, messageId: cardResult.messageId, edited: false };
     }
-    api.logger?.info?.(
+    api.logger?.warn?.(
       `[luckee] feishu native card send failed, falling back to openclaw send`
     );
   }
 
   const sendArgs = ["message", "send", ...buildMessageArgs(ctx, text), "--json"];
   const result = await runCommandDetailed("openclaw", sendArgs);
-  if (result.code !== 0) return { ok: false, edited: false };
+  if (result.code !== 0) {
+    api.logger?.warn?.(
+      `[luckee] openclaw send failed: channel=${channel} exitCode=${result.code} ` +
+      `stderr=${(result.stderr || "").slice(0, 300)}`
+    );
+    return { ok: false, edited: false };
+  }
 
   const payload =
     parseTrailingJsonObject(result.stdout) || parseTrailingJsonObject(result.stderr);
@@ -1102,7 +1170,7 @@ async function sendProgressMessageEditable(
     extractMessageIdFromRaw(result.stdout) ||
     extractMessageIdFromRaw(result.stderr);
   api.logger?.info?.(
-    `[luckee] send progress: channel=${channel} code=${result.code} messageId=${messageId || "none"}`
+    `[luckee] openclaw send ok: channel=${channel} messageId=${messageId || "none"}`
   );
   return { ok: true, messageId, edited: false };
 }
@@ -1413,16 +1481,45 @@ export default function register(api: any) {
         const flushEveryMs = Math.max(300, Number(cfg.streamFlushMs ?? 1000));
         const channel = String(ctx.channelId || ctx.channel || "").trim();
 
-        if (PUSH_CAPABLE_CHANNELS.has(channel)) {
+        api.logger?.info?.(
+          `[luckee] command: channel=${channel} ctx.to=${ctx.to || ""} ctx.from=${ctx.from || ""} ` +
+          `ctx.chatId=${ctx.chatId || ctx.chat_id || ""} ctx.senderId=${ctx.senderId || ""} ` +
+          `ctx.channelId=${ctx.channelId || ""} ctx.accountId=${ctx.accountId || ""}`
+        );
+
+        if (channel === "feishu") {
+          api.logger?.info?.(`[luckee] sending initial feishu card...`);
+          const initText = `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
+          const initResult = await sendFeishuCardNative(api, ctx, initText);
+          if (initResult.ok && initResult.messageId) {
+            progressMessageId = initResult.messageId;
+            streamed = true;
+            api.logger?.info?.(
+              `[luckee] initial feishu card ok: messageId=${initResult.messageId}`
+            );
+          } else {
+            api.logger?.warn?.(
+              `[luckee] initial feishu card FAILED: ok=${initResult.ok} messageId=${initResult.messageId || "none"}`
+            );
+          }
+        } else if (PUSH_CAPABLE_CHANNELS.has(channel)) {
           const initText = `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
           const initResult = await sendProgressMessageEditable(api, ctx, initText);
           if (initResult.ok && initResult.messageId) {
             progressMessageId = initResult.messageId;
             streamed = true;
             api.logger?.info?.(
-              `[luckee] immediate progress sent messageId=${initResult.messageId} channel=${channel}`
+              `[luckee] initial progress sent: messageId=${initResult.messageId} channel=${channel}`
+            );
+          } else {
+            api.logger?.warn?.(
+              `[luckee] initial progress FAILED: channel=${channel}`
             );
           }
+        } else {
+          api.logger?.info?.(
+            `[luckee] channel=${channel} is not push-capable, skipping initial card`
+          );
         }
 
         const storedToken =
@@ -1472,9 +1569,18 @@ export default function register(api: any) {
               "**方式一：** 在终端运行 `luckee login` 完成浏览器授权\n\n" +
               "**方式二：** 使用 token\n```\n/luckee token <your_token>\n```\n\n" +
               "**方式三：** 配置默认 token\n```\nopenclaw config set plugins.entries.luckee-tool.config.defaultToken \"<your_token>\"\n```";
-            const loginResult = await sendProgressMessageEditable(api, ctx, loginText, progressMessageId);
-            if (loginResult.ok) {
-              progressMessageId = loginResult.messageId || progressMessageId;
+            if (channel === "feishu") {
+              if (progressMessageId) {
+                await updateFeishuCardNative(api, progressMessageId, loginText);
+              } else {
+                const r = await sendFeishuCardNative(api, ctx, loginText);
+                if (r.ok && r.messageId) progressMessageId = r.messageId;
+              }
+            } else {
+              const loginResult = await sendProgressMessageEditable(api, ctx, loginText, progressMessageId);
+              if (loginResult.ok) {
+                progressMessageId = loginResult.messageId || progressMessageId;
+              }
             }
             streamed = true;
             return;
@@ -1485,6 +1591,20 @@ export default function register(api: any) {
             : `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
           const progressText = withProgressFooter(displayText, loadingTick);
           loadingTick += 1;
+
+          if (channel === "feishu") {
+            if (progressMessageId) {
+              const ok = await updateFeishuCardNative(api, progressMessageId, progressText);
+              if (ok) streamed = true;
+            } else {
+              const r = await sendFeishuCardNative(api, ctx, progressText);
+              if (r.ok && r.messageId) {
+                progressMessageId = r.messageId;
+                streamed = true;
+              }
+            }
+            return;
+          }
 
           const edited = await sendProgressMessageEditable(
             api,
@@ -1511,12 +1631,21 @@ export default function register(api: any) {
             abortHandle
           );
 
+          const updateCard = async (text: string) => {
+            if (!progressMessageId) return;
+            if (channel === "feishu") {
+              await updateFeishuCardNative(api, progressMessageId, text);
+            } else {
+              await sendProgressMessageEditable(api, ctx, text, progressMessageId);
+            }
+          };
+
           if (loginDetected) {
             if (progressMessageId) {
               const finalText = withDoneFooter(
                 normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)
               );
-              await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
+              await updateCard(finalText);
             }
             api.logger?.info?.(
               `[luckee] command success(after login): query="${safePreview(query)}" outputChars=${output.length}`
@@ -1529,7 +1658,7 @@ export default function register(api: any) {
               const finalText = withDoneFooter(
                 normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)
               );
-              await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
+              await updateCard(finalText);
             }
             api.logger?.info?.(
               `[luckee] command success(streamed): query="${safePreview(query)}" outputChars=${output.length}`
@@ -1541,6 +1670,15 @@ export default function register(api: any) {
           );
           return { text: output };
         } catch (streamErr: any) {
+          const updateCardOnError = async (text: string) => {
+            if (!progressMessageId) return;
+            if (channel === "feishu") {
+              await updateFeishuCardNative(api, progressMessageId, text);
+            } else {
+              await sendProgressMessageEditable(api, ctx, text, progressMessageId);
+            }
+          };
+
           if (loginDetected) {
             api.logger?.info?.("[luckee] command failed after login prompt");
             if (progressMessageId) {
@@ -1549,7 +1687,7 @@ export default function register(api: any) {
                 errMsg.includes("timed out") || errMsg.includes("180s")
                   ? "⏰ 登录超时，请重试或使用 `/luckee token <your_token>` 设置 token。"
                   : `登录后查询失败: ${safePreview(errMsg, 200)}`;
-              await sendProgressMessageEditable(api, ctx, failText, progressMessageId);
+              await updateCardOnError(failText);
             }
             return streamed ? { text: "" } : { text: "查询未完成，请检查登录状态后重试。" };
           }
@@ -1559,7 +1697,7 @@ export default function register(api: any) {
               const stoppedText =
                 (accumulated ? normalizeWrappedUrls(accumulated) + "\n\n" : "") +
                 "⛔ 查询已被手动停止";
-              await sendProgressMessageEditable(api, ctx, stoppedText, progressMessageId);
+              await updateCardOnError(stoppedText);
             }
             return streamed ? { text: "" } : { text: "查询已被手动停止。" };
           }
