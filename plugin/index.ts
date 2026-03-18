@@ -678,7 +678,7 @@ function runCommandStreaming(
 
 async function sendProgressMessage(ctx: any, text: string): Promise<boolean> {
   const channel = String(ctx.channelId || ctx.channel || "").trim();
-  const target = String(ctx.to || ctx.from || ctx.senderId || "").trim();
+  const target = resolveMessageTarget(ctx);
   if (!channel || !target || !PUSH_CAPABLE_CHANNELS.has(channel)) return false;
 
   const args = [
@@ -780,9 +780,19 @@ function extractMessageIdFromRaw(text: string): string | undefined {
   return undefined;
 }
 
+function resolveMessageTarget(ctx: any): string {
+  const channel = String(ctx.channelId || ctx.channel || "").trim();
+  if (channel === "feishu") {
+    return String(
+      ctx.chatId || ctx.chat_id || ctx.to || ctx.from || ctx.senderId || ""
+    ).trim();
+  }
+  return String(ctx.to || ctx.from || ctx.senderId || "").trim();
+}
+
 function buildMessageArgs(ctx: any, text: string): string[] {
   const channel = String(ctx.channelId || ctx.channel || "").trim();
-  const target = String(ctx.to || ctx.from || ctx.senderId || "").trim();
+  const target = resolveMessageTarget(ctx);
   const args = [
     "--channel",
     channel,
@@ -1145,7 +1155,7 @@ async function sendProgressMessageEditable(
   prevMessageId?: string
 ): Promise<{ ok: boolean; messageId?: string; edited: boolean }> {
   const channel = String(ctx.channelId || ctx.channel || "").trim();
-  const target = String(ctx.to || ctx.from || ctx.senderId || "").trim();
+  const target = resolveMessageTarget(ctx);
   if (!channel || !target || !PUSH_CAPABLE_CHANNELS.has(channel)) {
     api.logger?.warn?.(
       `[luckee] sendProgressMessageEditable: skipped (channel=${channel || "empty"} target=${target || "empty"} pushCapable=${PUSH_CAPABLE_CHANNELS.has(channel)})`
@@ -1237,7 +1247,7 @@ export default function register(api: any) {
       async execute(_id: string, params: any, ctx?: any) {
         const query = String(params.query ?? "").trim();
         const channel = ctx ? String(ctx.channelId || ctx.channel || "").trim() : "";
-        const target = ctx ? String(ctx.to || ctx.from || ctx.senderId || "").trim() : "";
+        const target = ctx ? resolveMessageTarget(ctx) : "";
         const canPush = Boolean(channel && target && PUSH_CAPABLE_CHANNELS.has(channel));
 
         if (!canPush) {
