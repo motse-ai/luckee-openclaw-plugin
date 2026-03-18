@@ -841,30 +841,52 @@ function buildFeishuCard(text: string): Record<string, any> {
           content: markdownSafeText,
         },
         {
-          tag: "button",
-          type: "danger",
-          size: "small",
-          text: {
-            tag: "plain_text",
-            content: "Stop",
-          },
-          confirm: {
-            title: {
-              tag: "plain_text",
-              content: "Stop Luckee",
-            },
-            text: {
-              tag: "plain_text",
-              content: "Stop the current Luckee query or login wait for this chat?",
-            },
-          },
-          behaviors: [
+          tag: "hr",
+        },
+        {
+          tag: "column_set",
+          flex_mode: "none",
+          background_style: "default",
+          horizontal_spacing: "12px",
+          columns: [
             {
-              type: "callback",
-              value: {
-                command: "/luckee stop",
-                text: "/luckee stop",
-              },
+              tag: "column",
+              width: "weighted",
+              weight: 1,
+              vertical_align: "center",
+              elements: [
+                {
+                  tag: "markdown",
+                  content: "**操作**",
+                },
+              ],
+            },
+            {
+              tag: "column",
+              width: "auto",
+              vertical_align: "center",
+              elements: [
+                {
+                  tag: "button",
+                  element_id: "stop_luckee",
+                  type: "danger",
+                  size: "small",
+                  width: "default",
+                  text: {
+                    tag: "plain_text",
+                    content: "Stop",
+                  },
+                  behaviors: [
+                    {
+                      type: "callback",
+                      value: {
+                        command: "/luckee stop",
+                        text: "/luckee stop",
+                      },
+                    },
+                  ],
+                },
+              ],
             },
           ],
         },
