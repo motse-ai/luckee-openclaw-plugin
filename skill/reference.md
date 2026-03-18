@@ -65,7 +65,7 @@ The plugin sends real-time streaming progress updates on channels that support p
 - `synology-chat`
 - `tlon`
 
-On Feishu, the plugin uses native card updates via the Feishu Open API (`im/v1/messages/{id}` PATCH) for smoother in-place editing. This is an **optional** feature that only activates when the user has already configured `channels.feishu.appId` and `channels.feishu.appSecret` in OpenClaw. The plugin never prompts for or collects these credentials itself.
+On Feishu, progress messages are now sent through OpenClaw only. If `openclaw message edit` is unsupported for the current Feishu message type, the plugin falls back to an OpenClaw-only replacement flow: send the updated progress message, then best-effort delete the previous one.
 
 ## Token Store Format
 
@@ -116,30 +116,22 @@ After auto-install, the binary probe runs again. Results are cached per configur
 - Running normal `luckee` commands also checks session status and prompts browser authorization automatically when not logged in.
 - During support flows, do not ask users for API URL or User ID.
 
-## Feishu Card Native Updates (Optional)
+## Feishu Progress Delivery
 
-> This feature only activates when the user has already configured Feishu credentials in OpenClaw. The plugin never prompts for or collects `appId`/`appSecret` on its own.
+The plugin does not use direct Feishu app credentials or native Feishu API calls for progress delivery.
 
-When the channel is `feishu` and the plugin has a `messageId` from a previous send, it attempts in-place card updates via:
+When the channel is `feishu` and the plugin has a `messageId` from a previous send, it first tries:
 
-```
-PATCH https://open.feishu.cn/open-apis/im/v1/messages/{messageId}
-Authorization: Bearer <tenant_access_token>
-Content-Type: application/json
-
-{ "content": "<interactive card JSON>" }
+```bash
+openclaw message edit --channel feishu --target <target> --message-id <messageId> --message "<text>"
 ```
 
-The tenant access token is obtained from:
+If OpenClaw reports that message editing is unsupported for that message, the plugin falls back to:
 
-```
-POST https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal
-{ "app_id": "<appId>", "app_secret": "<appSecret>" }
-```
+1. `openclaw message send ...`
+2. `openclaw message delete ...` for the old progress message
 
-Token is cached with TTL from the response (default 7200s). Credentials come from `channels.feishu.appId` and `channels.feishu.appSecret` in OpenClaw config.
-
-If the native update fails, the plugin falls back to sending a new message and deleting the old one.
+This keeps delivery inside OpenClaw and avoids any plugin-managed Feishu credentials.
 
 ## Error Catalog
 
