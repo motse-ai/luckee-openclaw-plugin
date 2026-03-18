@@ -59,7 +59,26 @@ const persistedTokenBySenderHash = new Map<string, string>();
 let persistedDefaultToken: string | undefined;
 let tokenStoreLoaded = false;
 let tokenStoreLoadPromise: Promise<void> | null = null;
-const activeProcesses = new Map<string, { kill: () => void; query: string }>();
+type TrackedProcess = {
+  kill: () => void;
+  query: string;
+};
+
+type AuthWaitSession = TrackedProcess & {
+  id: string;
+  authUrl?: string | null;
+  messageId?: string;
+  startedAt: number;
+  origin: "tool" | "command";
+};
+
+type StreamingRaceResult =
+  | { kind: "done"; output: string }
+  | { kind: "error"; error: any }
+  | { kind: "auth"; sessionId: string };
+
+const activeProcesses = new Map<string, TrackedProcess>();
+const authWaitSessions = new Map<string, AuthWaitSession>();
 
 type LuckeeTokenStore = {
   version: 1;
@@ -339,6 +358,43 @@ function buildLoginRequiredMessage(authUrl?: string | null): string {
     "**方式二：** 使用 token\n```\n/luckee token <your_token>\n```\n\n" +
     "**方式三：** 配置默认 token\n```\nopenclaw config set plugins.entries.luckee-tool.config.defaultToken \"<your_token>\"\n```"
   );
+}
+
+function buildAuthWaitInProgressMessage(authUrl?: string | null): string {
+  return (
+    `${buildLoginRequiredMessage(authUrl)}\n\n` +
+    "认证仍在后台等待中。完成授权后重新发送请求，或发送 `/luckee stop` 取消当前登录等待。"
+  );
+}
+
+function createAuthWaitSession(
+  query: string,
+  kill: () => void,
+  authUrl: string | null | undefined,
+  messageId: string | undefined,
+  origin: "tool" | "command"
+): AuthWaitSession {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    kill,
+    query,
+    authUrl,
+    messageId,
+    startedAt: Date.now(),
+    origin,
+  };
+}
+
+function replaceAuthWaitSession(processKey: string, session: AuthWaitSession): void {
+  const prev = authWaitSessions.get(processKey);
+  if (prev && prev.id !== session.id) {
+    try {
+      prev.kill();
+    } catch {
+      // Best effort only: replaced sessions should stop polling.
+    }
+  }
+  authWaitSessions.set(processKey, session);
 }
 
 function withProgressFooter(text: string, tick: number): string {
@@ -1231,6 +1287,113 @@ async function sendProgressMessageEditable(
   return { ok: true, messageId, edited: false };
 }
 
+function takeTrackedProcess(
+  key?: string
+): { proc?: TrackedProcess; kind?: "active" | "auth" } {
+  if (key) {
+    const active = activeProcesses.get(key);
+    if (active) {
+      activeProcesses.delete(key);
+      return { proc: active, kind: "active" };
+    }
+
+    const auth = authWaitSessions.get(key);
+    if (auth) {
+      authWaitSessions.delete(key);
+      return { proc: auth, kind: "auth" };
+    }
+  }
+
+  if (activeProcesses.size + authWaitSessions.size !== 1) {
+    return {};
+  }
+
+  if (activeProcesses.size === 1) {
+    const [onlyKey, onlyProc] = [...activeProcesses.entries()][0];
+    activeProcesses.delete(onlyKey);
+    return { proc: onlyProc, kind: "active" };
+  }
+
+  if (authWaitSessions.size === 1) {
+    const [onlyKey, onlyProc] = [...authWaitSessions.entries()][0];
+    authWaitSessions.delete(onlyKey);
+    return { proc: onlyProc, kind: "auth" };
+  }
+
+  return {};
+}
+
+function settleDetachedAuthWait(params: {
+  api: any;
+  ctx: any;
+  processKey: string;
+  sessionId: string;
+  query: string;
+  origin: "tool" | "command";
+  runPromise: Promise<string>;
+  getProgressMessageId: () => string | undefined;
+  setProgressMessageId: (messageId?: string) => void;
+}) {
+  const {
+    api,
+    ctx,
+    processKey,
+    sessionId,
+    query,
+    origin,
+    runPromise,
+    getProgressMessageId,
+    setProgressMessageId,
+  } = params;
+
+  const updateCard = async (text: string) => {
+    const currentSession = authWaitSessions.get(processKey);
+    if (!currentSession || currentSession.id !== sessionId) return;
+    const currentMessageId = getProgressMessageId();
+    if (!currentMessageId) return;
+    const result = await sendProgressMessageEditable(api, ctx, text, currentMessageId);
+    if (result.ok && result.messageId) {
+      setProgressMessageId(result.messageId);
+      const latest = authWaitSessions.get(processKey);
+      if (latest && latest.id === sessionId) {
+        latest.messageId = result.messageId;
+      }
+    }
+  };
+
+  void runPromise
+    .then(async (output) => {
+      const currentSession = authWaitSessions.get(processKey);
+      if (!currentSession || currentSession.id !== sessionId) return;
+
+      await updateCard(
+        withDoneFooter(normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output))
+      );
+      authWaitSessions.delete(processKey);
+      api.logger?.info?.(
+        `[luckee] ${origin} success(detached auth wait): query="${safePreview(query)}" outputChars=${output.length}`
+      );
+    })
+    .catch(async (streamErr: any) => {
+      const currentSession = authWaitSessions.get(processKey);
+      if (!currentSession || currentSession.id !== sessionId) {
+        api.logger?.info?.(`[luckee] ${origin} detached auth wait ended after replacement/stop`);
+        return;
+      }
+
+      const errMsg = String(streamErr?.message || streamErr || "");
+      const failText =
+        errMsg.includes("timed out") || errMsg.includes("180s")
+          ? "⏰ 登录超时，请重试或使用 `/luckee token <your_token>` 设置 token。"
+          : `登录后查询失败: ${safePreview(errMsg, 200)}`;
+      await updateCard(failText);
+      authWaitSessions.delete(processKey);
+      api.logger?.info?.(
+        `[luckee] ${origin} detached auth wait failed: query="${safePreview(query)}" error=${safePreview(errMsg, 200)}`
+      );
+    });
+}
+
 export default function register(api: any) {
   api.registerTool(
     {
@@ -1276,6 +1439,23 @@ export default function register(api: any) {
           }
 
           const senderKey = getSenderKey(ctx);
+          const existingAuthSession = authWaitSessions.get(senderKey);
+          if (existingAuthSession && !(params?.token && String(params.token).trim())) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    "Authentication is already pending in the background.\n\n" +
+                    buildAuthWaitInProgressMessage(existingAuthSession.authUrl),
+                },
+              ],
+            };
+          }
+          if (existingAuthSession) {
+            authWaitSessions.delete(senderKey);
+            existingAuthSession.kill();
+          }
           const storedToken =
             tokenBySender.get(senderKey) ||
             persistedTokenBySenderHash.get(hashSenderKey(senderKey));
@@ -1304,6 +1484,7 @@ export default function register(api: any) {
           let progressMessageId: string | undefined;
           let accumulated = "";
           let loadingTick = 0;
+          let loginDetected = false;
           const abortHandle: { kill: () => void } = { kill: () => {} };
           if (PUSH_CAPABLE_CHANNELS.has(channel)) {
             const initText = `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
@@ -1319,7 +1500,13 @@ export default function register(api: any) {
           const processKey = getSenderKey(ctx);
           activeProcesses.set(processKey, { kill: () => abortHandle.kill(), query });
 
+          let resolveAuthWaitReady: ((sessionId: string) => void) | null = null;
+          const authWaitReady = new Promise<string>((resolve) => {
+            resolveAuthWaitReady = resolve;
+          });
+
           const pushProgress = async (chunk?: string) => {
+            if (loginDetected) return;
             if (chunk) {
               accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
               if (accumulated.length > 3500) {
@@ -1327,6 +1514,33 @@ export default function register(api: any) {
               }
             }
             if (!accumulated && !progressMessageId) return;
+
+            if (detectLoginRequired(accumulated)) {
+              loginDetected = true;
+              const authUrl = extractAuthUrl(accumulated);
+              const loginResult = await sendProgressMessageEditable(
+                api,
+                ctx,
+                buildLoginRequiredMessage(authUrl),
+                progressMessageId
+              );
+              if (loginResult.ok) {
+                progressMessageId = loginResult.messageId || progressMessageId;
+              }
+
+              const session = createAuthWaitSession(
+                query,
+                () => abortHandle.kill(),
+                authUrl,
+                progressMessageId,
+                "tool"
+              );
+              replaceAuthWaitSession(processKey, session);
+              activeProcesses.delete(processKey);
+              resolveAuthWaitReady?.(session.id);
+              resolveAuthWaitReady = null;
+              return;
+            }
 
             const displayText = accumulated
               ? normalizeWrappedUrls(accumulated)
@@ -1343,7 +1557,7 @@ export default function register(api: any) {
           };
 
           try {
-            const output = await runCommandStreaming(
+            const runPromise = runCommandStreaming(
               binaryPath,
               args,
               async (chunk) => pushProgress(chunk),
@@ -1351,6 +1565,50 @@ export default function register(api: any) {
               async () => pushProgress(),
               abortHandle
             );
+            const runResultPromise: Promise<StreamingRaceResult> = runPromise.then(
+              (output) => ({ kind: "done", output }),
+              (error) => ({ kind: "error", error })
+            );
+            const authResultPromise: Promise<StreamingRaceResult> = authWaitReady.then((sessionId) => ({
+              kind: "auth",
+              sessionId,
+            }));
+            const result = await Promise.race([runResultPromise, authResultPromise]);
+
+            if (result.kind === "auth") {
+              settleDetachedAuthWait({
+                api,
+                ctx,
+                processKey,
+                sessionId: result.sessionId,
+                query,
+                origin: "tool",
+                runPromise,
+                getProgressMessageId: () => progressMessageId,
+                setProgressMessageId: (messageId) => {
+                  progressMessageId = messageId;
+                },
+              });
+              api.logger?.info?.(
+                `[luckee] tool detached auth wait: query="${safePreview(query)}" sessionId=${result.sessionId}`
+              );
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text:
+                      "Luckee authentication is pending in the background. " +
+                      "I posted the auth instructions in chat. After you finish login, ask me again.",
+                  },
+                ],
+              };
+            }
+
+            if (result.kind === "error") {
+              throw result.error;
+            }
+
+            const output = result.output;
 
             if (progressMessageId) {
               const finalText = withDoneFooter(
@@ -1388,25 +1646,22 @@ export default function register(api: any) {
       parameters: Type.Object({}),
       async execute(_id: string, _params: any, ctx?: any) {
         const key = ctx ? getSenderKey(ctx) : "";
-        let proc = key ? activeProcesses.get(key) : undefined;
-        if (!proc && activeProcesses.size === 1) {
-          const [onlyKey, onlyProc] = [...activeProcesses.entries()][0];
-          proc = onlyProc;
-          if (proc) {
-            proc.kill();
-            activeProcesses.delete(onlyKey);
-            api.logger?.info?.(`[luckee] stop tool: killed query="${safePreview(proc.query, 80)}"`);
-            return {
-              content: [{ type: "text", text: `已停止查询: ${safePreview(proc.query, 50)}` }],
-            };
-          }
-        }
+        const { proc, kind } = takeTrackedProcess(key);
         if (proc) {
           proc.kill();
-          activeProcesses.delete(key);
-          api.logger?.info?.(`[luckee] stop tool: killed query="${safePreview(proc.query, 80)}"`);
+          api.logger?.info?.(
+            `[luckee] stop tool: killed ${kind || "process"} query="${safePreview(proc.query, 80)}"`
+          );
           return {
-            content: [{ type: "text", text: `已停止查询: ${safePreview(proc.query, 50)}` }],
+            content: [
+              {
+                type: "text",
+                text:
+                  kind === "auth"
+                    ? `已停止登录等待: ${safePreview(proc.query, 50)}`
+                    : `已停止查询: ${safePreview(proc.query, 50)}`,
+              },
+            ],
           };
         }
         return {
@@ -1493,11 +1748,15 @@ export default function register(api: any) {
 
         if (lowerArgs === "stop") {
           const key = getSenderKey(ctx);
-          const proc = activeProcesses.get(key);
+          const { proc, kind } = takeTrackedProcess(key);
           if (proc) {
             proc.kill();
-            activeProcesses.delete(key);
-            return { text: `已停止查询: ${safePreview(proc.query, 50)}` };
+            return {
+              text:
+                kind === "auth"
+                  ? `已停止登录等待: ${safePreview(proc.query, 50)}`
+                  : `已停止查询: ${safePreview(proc.query, 50)}`,
+            };
           }
           return { text: "当前没有正在运行的查询。" };
         }
@@ -1528,6 +1787,15 @@ export default function register(api: any) {
             };
           }
           query = tokenDirective.query;
+        }
+
+        const existingAuthSession = authWaitSessions.get(senderKey);
+        if (existingAuthSession && !tokenDirective) {
+          return { text: buildAuthWaitInProgressMessage(existingAuthSession.authUrl) };
+        }
+        if (existingAuthSession) {
+          authWaitSessions.delete(senderKey);
+          existingAuthSession.kill();
         }
 
         let streamed = false;
@@ -1604,18 +1872,26 @@ export default function register(api: any) {
           if (detectLoginRequired(accumulated)) {
             loginDetected = true;
             const authUrl = extractAuthUrl(accumulated);
-            const loginText =
-              "🔐 **需要登录**\n\n" +
-              "Luckee 检测到当前未登录或 token 已失效。\n\n" +
-              (authUrl ? `授权链接:\n${authUrl}\n\n` : "") +
-              "请通过以下方式之一进行认证：\n\n" +
-              "**方式一：** 在终端运行 `luckee login` 完成浏览器授权\n\n" +
-              "**方式二：** 使用 token\n```\n/luckee token <your_token>\n```\n\n" +
-              "**方式三：** 配置默认 token\n```\nopenclaw config set plugins.entries.luckee-tool.config.defaultToken \"<your_token>\"\n```";
-            const loginResult = await sendProgressMessageEditable(api, ctx, loginText, progressMessageId);
+            const loginResult = await sendProgressMessageEditable(
+              api,
+              ctx,
+              buildLoginRequiredMessage(authUrl),
+              progressMessageId
+            );
             if (loginResult.ok) {
               progressMessageId = loginResult.messageId || progressMessageId;
             }
+            const session = createAuthWaitSession(
+              query,
+              () => abortHandle.kill(),
+              authUrl,
+              progressMessageId,
+              "command"
+            );
+            replaceAuthWaitSession(processKey, session);
+            activeProcesses.delete(processKey);
+            resolveAuthWaitReady?.(session.id);
+            resolveAuthWaitReady = null;
             streamed = true;
             return;
           }
@@ -1641,8 +1917,13 @@ export default function register(api: any) {
         const processKey = getSenderKey(ctx);
         activeProcesses.set(processKey, { kill: () => abortHandle.kill(), query });
 
+        let resolveAuthWaitReady: ((sessionId: string) => void) | null = null;
+        const authWaitReady = new Promise<string>((resolve) => {
+          resolveAuthWaitReady = resolve;
+        });
+
         try {
-          const output = await runCommandStreaming(
+          const runPromise = runCommandStreaming(
             binaryPath,
             args,
             async (chunk) => pushProgress(chunk),
@@ -1650,6 +1931,15 @@ export default function register(api: any) {
             async () => pushProgress(),
             abortHandle
           );
+          const runResultPromise: Promise<StreamingRaceResult> = runPromise.then(
+            (output) => ({ kind: "done", output }),
+            (error) => ({ kind: "error", error })
+          );
+          const authResultPromise: Promise<StreamingRaceResult> = authWaitReady.then((sessionId) => ({
+            kind: "auth",
+            sessionId,
+          }));
+          const result = await Promise.race([runResultPromise, authResultPromise]);
 
           const updateCard = async (text: string) => {
             if (!progressMessageId) return;
@@ -1658,6 +1948,32 @@ export default function register(api: any) {
               progressMessageId = result.messageId;
             }
           };
+
+          if (result.kind === "auth") {
+            settleDetachedAuthWait({
+              api,
+              ctx,
+              processKey,
+              sessionId: result.sessionId,
+              query,
+              origin: "command",
+              runPromise,
+              getProgressMessageId: () => progressMessageId,
+              setProgressMessageId: (messageId) => {
+                progressMessageId = messageId;
+              },
+            });
+            api.logger?.info?.(
+              `[luckee] command detached auth wait: query="${safePreview(query)}" sessionId=${result.sessionId}`
+            );
+            return streamed ? { text: "" } : { text: "认证已在后台等待中，完成授权后请重新发送请求。" };
+          }
+
+          if (result.kind === "error") {
+            throw result.error;
+          }
+
+          const output = result.output;
 
           if (loginDetected) {
             if (progressMessageId) {
@@ -1743,11 +2059,15 @@ export default function register(api: any) {
     requireAuth: false,
     handler: async (ctx: any) => {
       const key = getSenderKey(ctx);
-      const proc = activeProcesses.get(key);
+      const { proc, kind } = takeTrackedProcess(key);
       if (proc) {
         proc.kill();
-        activeProcesses.delete(key);
-        return { text: `已停止查询: ${safePreview(proc.query, 50)}` };
+        return {
+          text:
+            kind === "auth"
+              ? `已停止登录等待: ${safePreview(proc.query, 50)}`
+              : `已停止查询: ${safePreview(proc.query, 50)}`,
+        };
       }
       return { text: "当前没有正在运行的查询。" };
     },
