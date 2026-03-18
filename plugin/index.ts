@@ -92,6 +92,18 @@ type InteractiveLuckeeResult =
   | { kind: "stopped"; output: string; usedPush: boolean }
   | { kind: "auth-pending"; message: string; usedPush: boolean };
 
+type LuckeeControlResult =
+  | { kind: "done"; output: string; usedPush: boolean }
+  | { kind: "stopped"; output: string; usedPush: boolean };
+
+type LuckeeCommandAction =
+  | "help"
+  | "stop"
+  | "query"
+  | "token"
+  | "login"
+  | "logout";
+
 const activeProcesses = new Map<string, TrackedProcess>();
 const authWaitSessions = new Map<string, AuthWaitSession>();
 const activeFeishuProgressCards = new Map<string, ActiveFeishuProgressCard>();
@@ -413,6 +425,15 @@ function stripStatusFooter(text: string): string {
     /\n\n---\n(?:⏳ Still loading\.{1,3}|✅ Completed|⏹️ Stopped)\s*$/s,
     ""
   );
+}
+
+function buildStoppedCardText(currentText: string, stoppedText: string): string {
+  const statusText = String(stoppedText || "").trim() || "当前查询已停止。";
+  const previousText = stripStatusFooter(currentText || "").trim();
+  if (!previousText || previousText === statusText) {
+    return withStoppedFooter(statusText);
+  }
+  return withStoppedFooter(`${statusText}\n\n${previousText}`);
 }
 
 function rememberActiveFeishuProgressCard(
@@ -1549,7 +1570,9 @@ async function disableFeishuStopButton(
   const messageId = trackedCard?.messageId || extractFeishuMessageId(ctx);
   if (!messageId) return;
   const baseText = stripStatusFooter(trackedCard?.text || fallbackText || "当前查询已停止。");
-  const nextText = appendStoppedFooter ? withStoppedFooter(baseText) : baseText;
+  const nextText = appendStoppedFooter
+    ? buildStoppedCardText(baseText, fallbackText)
+    : (String(fallbackText || "").trim() || baseText);
   const ok = await updateFeishuCardNative(api, messageId, nextText, {
     stopButtonDisabled: true,
     stopButtonText: buttonText,
@@ -1611,10 +1634,160 @@ async function saveTokenForContext(
     : "Default Luckee token saved.";
 }
 
+async function executeLuckeeControlAction(
+  api: any,
+  action: "login" | "logout",
+  ctx?: any,
+  origin: "tool" | "command" = "command"
+): Promise<LuckeeControlResult> {
+  const channel = ctx ? String(ctx.channelId || ctx.channel || "").trim() : "";
+  const canPush = canPushLuckeeUpdates(ctx);
+  const runtimeCfg: LuckeeConfig =
+    api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
+  const binaryPath = await resolveLuckeeBinaryOrThrow(api, runtimeCfg);
+  const args = [action];
+  const senderKey = ctx ? getSenderKey(ctx) : "";
+  const commandLabel = `luckee ${action}`;
+
+  logLuckeeInvocation(api, origin, {
+    action,
+    channel,
+    streaming: canPush,
+  });
+  api.logger?.info?.(`[luckee] ${origin} resolved binary: ${binaryPath}`);
+  api.logger?.info?.(`[luckee] ${origin} cli args: ${JSON.stringify(args)}`);
+
+  if (!canPush) {
+    const abortHandle: { kill: () => void } = { kill: () => {} };
+    if (senderKey) {
+      const interruptedExisting = stopTrackedProcess(senderKey);
+      if (interruptedExisting.stopped) {
+        api.logger?.info?.(
+          `[luckee] ${origin} interrupted prior ${interruptedExisting.kind || "process"} for sender=${hashSenderKey(senderKey).slice(0, 8)} query="${safePreview(interruptedExisting.query || "", 80)}"`
+        );
+      }
+      activeProcesses.set(senderKey, { kill: () => abortHandle.kill(), query: action });
+    }
+    try {
+      const output = await runCommand(binaryPath, args, senderKey ? abortHandle : undefined);
+      return {
+        kind: "done",
+        output: normalizeWrappedUrls(output),
+        usedPush: false,
+      };
+    } catch (err: any) {
+      if (isLuckeeStoppedError(err)) {
+        return {
+          kind: "stopped",
+          output: `已停止执行 \`${commandLabel}\`。`,
+          usedPush: false,
+        };
+      }
+      throw err;
+    } finally {
+      if (senderKey) {
+        activeProcesses.delete(senderKey);
+      }
+    }
+  }
+
+  const processKey = senderKey;
+  const abortHandle: { kill: () => void } = { kill: () => {} };
+  const interruptedExisting = stopTrackedProcess(processKey);
+  if (interruptedExisting.stopped) {
+    api.logger?.info?.(
+      `[luckee] ${origin} interrupted prior ${interruptedExisting.kind || "process"} for sender=${hashSenderKey(processKey).slice(0, 8)} query="${safePreview(interruptedExisting.query || "", 80)}"`
+    );
+  }
+
+  const flushEveryMs = Math.max(300, Number(runtimeCfg.streamFlushMs ?? 1000));
+  let progressMessageId: string | undefined;
+  let accumulated = "";
+  let loadingTick = 0;
+  const initText = `🔄 正在执行: \`${commandLabel}\`\n\n请稍候...`;
+  const initResult = await sendProgressMessageEditable(api, ctx, initText);
+  if (initResult.ok && initResult.messageId) {
+    progressMessageId = initResult.messageId;
+    rememberActiveFeishuProgressCard(processKey, initResult.messageId, initText);
+  }
+  activeProcesses.set(processKey, { kill: () => abortHandle.kill(), query: action });
+
+  const pushProgress = async (chunk?: string) => {
+    if (chunk) {
+      accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
+      if (accumulated.length > 3500) {
+        accumulated = `...(truncated old output)\n${accumulated.slice(-3200)}`;
+      }
+    }
+    const displayText = accumulated
+      ? normalizeWrappedUrls(accumulated)
+      : `🔄 正在执行: \`${commandLabel}\`\n\n请稍候...`;
+    const progressText = withProgressFooter(displayText, loadingTick);
+    loadingTick += 1;
+    const edited = await sendProgressMessageEditable(api, ctx, progressText, progressMessageId);
+    if (edited.ok) {
+      progressMessageId = edited.messageId || progressMessageId;
+      rememberActiveFeishuProgressCard(processKey, progressMessageId, progressText);
+    }
+  };
+
+  try {
+    const output = await runCommandStreaming(
+      binaryPath,
+      args,
+      async (chunk) => pushProgress(chunk),
+      flushEveryMs,
+      async () => pushProgress(),
+      abortHandle
+    );
+    const finalText = normalizeWrappedUrls(output);
+    if (channel === "feishu") {
+      await disableFeishuStopButton(
+        api,
+        processKey,
+        ctx,
+        finalText,
+        action === "login" ? "Login Complete" : "Logout Complete",
+        false
+      );
+    } else {
+      const edited = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
+      if (edited.ok) {
+        progressMessageId = edited.messageId || progressMessageId;
+      }
+    }
+    forgetActiveFeishuProgressCard(processKey, progressMessageId);
+    return { kind: "done", output: finalText, usedPush: true };
+  } catch (err: any) {
+    if (isLuckeeStoppedError(err)) {
+      const stoppedText = `已停止执行 \`${commandLabel}\`。`;
+      if (channel === "feishu") {
+        await disableFeishuStopButton(
+          api,
+          processKey,
+          ctx,
+          stoppedText,
+          "Stopped",
+          false
+        );
+      } else {
+        await sendProgressMessageEditable(api, ctx, stoppedText, progressMessageId);
+      }
+      forgetActiveFeishuProgressCard(processKey, progressMessageId);
+      return { kind: "stopped", output: stoppedText, usedPush: true };
+    }
+    throw err;
+  } finally {
+    activeProcesses.delete(processKey);
+  }
+}
+
 function buildLuckeeUsageMessage(): string {
   return (
     "Usage:\n" +
     "`/luckee <query>`\n" +
+    "`/luckee login`\n" +
+    "`/luckee logout`\n" +
     "`/luckee token <your_token>`\n" +
     "`/luckee token <your_token> <query>`\n" +
     "`/luckee stop`"
@@ -1622,7 +1795,7 @@ function buildLuckeeUsageMessage(): string {
 }
 
 function parseLuckeeCommandArgs(rawArgs: string): {
-  action: "help" | "stop" | "query" | "token";
+  action: LuckeeCommandAction;
   query?: string;
   token?: string;
   message?: string;
@@ -1634,6 +1807,14 @@ function parseLuckeeCommandArgs(rawArgs: string): {
 
   if (/^stop$/i.test(trimmed)) {
     return { action: "stop" };
+  }
+
+  if (/^login$/i.test(trimmed)) {
+    return { action: "login" };
+  }
+
+  if (/^logout$/i.test(trimmed)) {
+    return { action: "logout" };
   }
 
   const tokenMatch = trimmed.match(/^token\s+(\S+)(?:\s+([\s\S]+))?$/i);
@@ -1934,6 +2115,14 @@ async function executeLuckeeInteractive(
 
       if (result.kind === "error") {
         if (isLuckeeStoppedError(result.error)) {
+          await disableFeishuStopButton(
+            api,
+            processKey,
+            ctx,
+            `已停止查询: ${safePreview(query, 50)}`,
+            "Query Stopped",
+            true
+          );
           api.logger?.info?.(
             `[luckee] ${origin} stopped(streamed): query="${safePreview(query)}"`
           );
@@ -2019,6 +2208,19 @@ export default function register(api: any) {
       if (parsed.action === "stop") {
         const stopText = await handleLuckeeStop(api, ctx);
         return { text: stopText };
+      }
+
+      if (parsed.action === "login" || parsed.action === "logout") {
+        const result = await executeLuckeeControlAction(
+          api,
+          parsed.action,
+          ctx,
+          "command"
+        );
+        if (result.kind === "stopped") {
+          return result.usedPush ? {} : { text: result.output };
+        }
+        return result.usedPush ? {} : { text: result.output };
       }
 
       if (parsed.action === "token") {
