@@ -2,7 +2,7 @@
   "id": "luckee-tool",
   "name": "Luckee Tool",
   "version": "0.1.1",
-  "description": "Expose luckee CLI as OpenClaw tools plus a skill-backed /luckee command for product data queries",
+  "description": "Expose luckee CLI as OpenClaw tools plus a native /luckee slash command for product data queries",
   "skills": ["./skills"],
   "repository": "https://github.com/motse-ai/luckee-openclaw-plugin",
   "requires": {

@@ -77,6 +77,10 @@ type StreamingRaceResult =
   | { kind: "error"; error: any }
   | { kind: "auth"; sessionId: string };
 
+type InteractiveLuckeeResult =
+  | { kind: "done"; output: string; usedPush: boolean }
+  | { kind: "auth-pending"; message: string; usedPush: boolean };
+
 const activeProcesses = new Map<string, TrackedProcess>();
 const authWaitSessions = new Map<string, AuthWaitSession>();
 
@@ -397,13 +401,17 @@ async function executeLuckee(api: any, params: any): Promise<string> {
   const runtimeCfg: LuckeeConfig =
     api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
   await ensureTokenStoreLoaded(api, runtimeCfg);
-  if (params?.token && String(params.token).trim()) {
+  const persistProvidedToken = params?.persistProvidedToken !== false;
+  if (persistProvidedToken && params?.token && String(params.token).trim()) {
     persistedDefaultToken = String(params.token).trim();
     await writeTokenStore(runtimeCfg);
-    api.logger?.info?.("[luckee] persisted default token from tool invocation.");
+    api.logger?.info?.(
+      `[luckee] persisted default token from ${(params?.origin ?? "tool")} invocation.`
+    );
   }
   const { cfg, args } = resolveLuckeeInvocation(api, params);
-  logLuckeeInvocation(api, "tool", {
+  const origin = params?.origin === "command" ? "command" : "tool";
+  logLuckeeInvocation(api, origin, {
     query: safePreview(String(params.query ?? "")),
     hasToken: Boolean(params.token || cfg.defaultToken || persistedDefaultToken),
     token: redactToken(String(params.token || cfg.defaultToken || persistedDefaultToken || "")),
@@ -413,9 +421,9 @@ async function executeLuckee(api: any, params: any): Promise<string> {
     url: String(cfg.defaultUrl || ""),
   });
   const binaryPath = await resolveLuckeeBinaryOrThrow(api, cfg);
-  api.logger?.info?.(`[luckee] tool resolved binary: ${binaryPath}`);
+  api.logger?.info?.(`[luckee] ${origin} resolved binary: ${binaryPath}`);
   api.logger?.info?.(
-    `[luckee] tool cli args: ${JSON.stringify(redactCliArgs(args))}`
+    `[luckee] ${origin} cli args: ${JSON.stringify(redactCliArgs(args))}`
   );
   return runCommand(binaryPath, args);
 }
@@ -1362,6 +1370,75 @@ function stopTrackedProcess(
   };
 }
 
+async function saveTokenForContext(
+  api: any,
+  cfg: LuckeeConfig,
+  token: string,
+  ctx?: any
+): Promise<string> {
+  await ensureTokenStoreLoaded(api, cfg);
+
+  if (ctx) {
+    const senderKey = getSenderKey(ctx);
+    tokenBySender.set(senderKey, token);
+    persistedTokenBySenderHash.set(hashSenderKey(senderKey), token);
+    api.logger?.info?.(
+      `[luckee] token saved for sender=${hashSenderKey(senderKey).slice(0, 8)}`
+    );
+  } else {
+    persistedDefaultToken = token;
+    api.logger?.info?.("[luckee] token saved as default (no sender context).");
+  }
+
+  await writeTokenStore(cfg);
+  return ctx
+    ? "Token saved for this chat. You can now run your Luckee query."
+    : "Default Luckee token saved.";
+}
+
+function buildLuckeeUsageMessage(): string {
+  return (
+    "Usage:\n" +
+    "`/luckee <query>`\n" +
+    "`/luckee token <your_token>`\n" +
+    "`/luckee token <your_token> <query>`\n" +
+    "`/luckee stop`"
+  );
+}
+
+function parseLuckeeCommandArgs(rawArgs: string): {
+  action: "help" | "stop" | "query" | "token";
+  query?: string;
+  token?: string;
+  message?: string;
+} {
+  const trimmed = rawArgs.trim();
+  if (!trimmed) {
+    return { action: "help", message: buildLuckeeUsageMessage() };
+  }
+
+  if (/^stop$/i.test(trimmed)) {
+    return { action: "stop" };
+  }
+
+  const tokenMatch = trimmed.match(/^token\s+(\S+)(?:\s+([\s\S]+))?$/i);
+  if (/^token(?:\s+|$)/i.test(trimmed)) {
+    if (!tokenMatch) {
+      return {
+        action: "help",
+        message: "Missing token.\n\n" + buildLuckeeUsageMessage(),
+      };
+    }
+    return {
+      action: "token",
+      token: tokenMatch[1],
+      query: tokenMatch[2]?.trim(),
+    };
+  }
+
+  return { action: "query", query: trimmed };
+}
+
 function settleDetachedAuthWait(params: {
   api: any;
   ctx: any;
@@ -1433,7 +1510,291 @@ function settleDetachedAuthWait(params: {
     });
 }
 
+async function executeLuckeeInteractive(
+  api: any,
+  params: any,
+  ctx?: any,
+  origin: "tool" | "command" = "tool"
+): Promise<InteractiveLuckeeResult> {
+  const query = String(params.query ?? "").trim();
+  const channel = ctx ? String(ctx.channelId || ctx.channel || "").trim() : "";
+  const target = ctx ? resolveMessageTarget(ctx) : "";
+  const canPush = Boolean(channel && target && PUSH_CAPABLE_CHANNELS.has(channel));
+  const runtimeCfg: LuckeeConfig =
+    api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
+
+  await ensureTokenStoreLoaded(api, runtimeCfg);
+
+  const senderKey = ctx ? getSenderKey(ctx) : "";
+  const storedToken = ctx
+    ? tokenBySender.get(senderKey) ||
+      persistedTokenBySenderHash.get(hashSenderKey(senderKey))
+    : undefined;
+  const effectiveToken =
+    params.token || storedToken || runtimeCfg.defaultToken || persistedDefaultToken;
+
+  if (!canPush) {
+    const output = await executeLuckee(api, {
+      ...params,
+      token: effectiveToken,
+      origin,
+      persistProvidedToken:
+        origin === "tool" && Boolean(params?.token && String(params.token).trim()),
+    });
+    api.logger?.info?.(
+      `[luckee] ${origin} success: query="${safePreview(query)}" outputChars=${output.length}`
+    );
+    return { kind: "done", output, usedPush: false };
+  }
+
+  try {
+    if (origin === "tool" && params?.token && String(params.token).trim()) {
+      persistedDefaultToken = String(params.token).trim();
+      await writeTokenStore(runtimeCfg);
+      api.logger?.info?.("[luckee] persisted default token from tool invocation.");
+    }
+
+    const interruptedExisting = stopTrackedProcess(senderKey);
+    if (interruptedExisting.stopped) {
+      api.logger?.info?.(
+        `[luckee] ${origin} interrupted prior ${interruptedExisting.kind || "process"} for sender=${hashSenderKey(senderKey).slice(0, 8)} query="${safePreview(interruptedExisting.query || "", 80)}"`
+      );
+    }
+
+    const { cfg, args } = resolveLuckeeInvocation(api, {
+      ...params,
+      token: effectiveToken,
+    });
+    logLuckeeInvocation(api, origin, {
+      query: safePreview(query),
+      hasToken: Boolean(effectiveToken),
+      token: redactToken(String(effectiveToken || "")),
+      channel,
+      streaming: true,
+    });
+
+    const binaryPath = await resolveLuckeeBinaryOrThrow(api, cfg);
+    api.logger?.info?.(`[luckee] ${origin} resolved binary: ${binaryPath}`);
+    api.logger?.info?.(
+      `[luckee] ${origin} cli args: ${JSON.stringify(redactCliArgs(args))}`
+    );
+
+    const flushEveryMs = Math.max(300, Number(runtimeCfg.streamFlushMs ?? 1000));
+    let progressMessageId: string | undefined;
+    let accumulated = "";
+    let loadingTick = 0;
+    let loginDetected = false;
+    const abortHandle: { kill: () => void } = { kill: () => {} };
+    const initText = `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
+    const initResult = await sendProgressMessageEditable(api, ctx, initText);
+    if (initResult.ok && initResult.messageId) {
+      progressMessageId = initResult.messageId;
+      api.logger?.info?.(
+        `[luckee] ${origin} initial progress sent: messageId=${initResult.messageId} channel=${channel}`
+      );
+    }
+
+    const processKey = getSenderKey(ctx);
+    activeProcesses.set(processKey, { kill: () => abortHandle.kill(), query });
+
+    let resolveAuthWaitReady: ((sessionId: string) => void) | null = null;
+    const authWaitReady = new Promise<string>((resolve) => {
+      resolveAuthWaitReady = resolve;
+    });
+
+    const pushProgress = async (chunk?: string) => {
+      if (loginDetected) return;
+      if (chunk) {
+        accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
+        if (accumulated.length > 3500) {
+          accumulated = `...(truncated old output)\n${accumulated.slice(-3200)}`;
+        }
+      }
+      if (!accumulated && !progressMessageId) return;
+
+      if (detectLoginRequired(accumulated)) {
+        loginDetected = true;
+        const authUrl = extractAuthUrl(accumulated);
+        const loginResult = await sendProgressMessageEditable(
+          api,
+          ctx,
+          buildLoginRequiredMessage(authUrl),
+          progressMessageId
+        );
+        if (loginResult.ok) {
+          progressMessageId = loginResult.messageId || progressMessageId;
+        }
+
+        const session = createAuthWaitSession(
+          query,
+          () => abortHandle.kill(),
+          authUrl,
+          progressMessageId,
+          origin
+        );
+        replaceAuthWaitSession(processKey, session);
+        activeProcesses.delete(processKey);
+        resolveAuthWaitReady?.(session.id);
+        resolveAuthWaitReady = null;
+        return;
+      }
+
+      const displayText = accumulated
+        ? normalizeWrappedUrls(accumulated)
+        : `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
+      const progressText = withProgressFooter(displayText, loadingTick);
+      loadingTick += 1;
+
+      const edited = await sendProgressMessageEditable(
+        api, ctx, progressText, progressMessageId
+      );
+      if (edited.ok) {
+        progressMessageId = edited.messageId || progressMessageId;
+      }
+    };
+
+    try {
+      const runPromise = runCommandStreaming(
+        binaryPath,
+        args,
+        async (chunk) => pushProgress(chunk),
+        flushEveryMs,
+        async () => pushProgress(),
+        abortHandle
+      );
+      const runResultPromise: Promise<StreamingRaceResult> = runPromise.then(
+        (output) => ({ kind: "done", output }),
+        (error) => ({ kind: "error", error })
+      );
+      const authResultPromise: Promise<StreamingRaceResult> = authWaitReady.then((sessionId) => ({
+        kind: "auth",
+        sessionId,
+      }));
+      const result = await Promise.race([runResultPromise, authResultPromise]);
+
+      if (result.kind === "auth") {
+        settleDetachedAuthWait({
+          api,
+          ctx,
+          processKey,
+          sessionId: result.sessionId,
+          query,
+          origin,
+          runPromise,
+          getProgressMessageId: () => progressMessageId,
+          setProgressMessageId: (messageId) => {
+            progressMessageId = messageId;
+          },
+        });
+        api.logger?.info?.(
+          `[luckee] ${origin} detached auth wait: query="${safePreview(query)}" sessionId=${result.sessionId}`
+        );
+        return {
+          kind: "auth-pending",
+          message:
+            "Luckee authentication is pending in the background. " +
+            "I posted the auth instructions in chat. After you finish login, ask me again.",
+          usedPush: true,
+        };
+      }
+
+      if (result.kind === "error") {
+        throw result.error;
+      }
+
+      const output = result.output;
+
+      if (progressMessageId) {
+        const finalText = withDoneFooter(
+          normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)
+        );
+        const finalResult = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
+        if (finalResult.ok && finalResult.messageId) {
+          progressMessageId = finalResult.messageId;
+        }
+      }
+
+      api.logger?.info?.(
+        `[luckee] ${origin} success(streamed): query="${safePreview(query)}" outputChars=${output.length}`
+      );
+      return { kind: "done", output, usedPush: true };
+    } finally {
+      activeProcesses.delete(processKey);
+    }
+  } catch (err: any) {
+    api.logger?.error?.(
+      `[luckee] ${origin} failed: query="${safePreview(query)}" error=${String(err?.message || err)}`
+    );
+    throw err;
+  }
+}
+
 export default function register(api: any) {
+  api.registerCommand({
+    name: "luckee",
+    description: "Run Luckee queries directly from chat.",
+    acceptsArgs: true,
+    async handler(ctx: any) {
+      const parsed = parseLuckeeCommandArgs(String(ctx.args ?? ""));
+      const runtimeCfg: LuckeeConfig =
+        api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
+
+      if (parsed.action === "help") {
+        return { text: parsed.message || buildLuckeeUsageMessage() };
+      }
+
+      if (parsed.action === "stop") {
+        const stopped = stopTrackedProcess(getSenderKey(ctx));
+        if (stopped.stopped) {
+          api.logger?.info?.(
+            `[luckee] command stop: killed ${stopped.kind || "process"} query="${safePreview(stopped.query || "", 80)}"`
+          );
+          return {
+            text:
+              stopped.kind === "auth"
+                ? `已停止登录等待: ${safePreview(stopped.query || "", 50)}`
+                : `已停止查询: ${safePreview(stopped.query || "", 50)}`,
+          };
+        }
+        return { text: "当前没有正在运行的查询。" };
+      }
+
+      if (parsed.action === "token") {
+        const token = String(parsed.token || "").trim();
+        if (!token) {
+          return { text: "Missing token.\n\n" + buildLuckeeUsageMessage() };
+        }
+
+        const savedText = await saveTokenForContext(api, runtimeCfg, token, ctx);
+        if (!parsed.query) {
+          return { text: savedText };
+        }
+
+        const result = await executeLuckeeInteractive(
+          api,
+          { query: parsed.query },
+          ctx,
+          "command"
+        );
+        if (result.kind === "auth-pending") {
+          return { text: result.message };
+        }
+        return result.usedPush ? {} : { text: result.output };
+      }
+
+      const result = await executeLuckeeInteractive(
+        api,
+        { query: parsed.query },
+        ctx,
+        "command"
+      );
+      if (result.kind === "auth-pending") {
+        return { text: result.message };
+      }
+      return result.usedPush ? {} : { text: result.output };
+    },
+  });
+
   api.registerTool(
     {
       name: "luckee_query",
@@ -1447,220 +1808,15 @@ export default function register(api: any) {
         timeout: Type.Optional(Type.Number()),
       }),
       async execute(_id: string, params: any, ctx?: any) {
-        const query = String(params.query ?? "").trim();
-        const channel = ctx ? String(ctx.channelId || ctx.channel || "").trim() : "";
-        const target = ctx ? resolveMessageTarget(ctx) : "";
-        const canPush = Boolean(channel && target && PUSH_CAPABLE_CHANNELS.has(channel));
-
-        if (!canPush) {
-          try {
-            const output = await executeLuckee(api, params);
-            api.logger?.info?.(
-              `[luckee] tool success: query="${safePreview(query)}" outputChars=${output.length}`
-            );
-            return { content: [{ type: "text", text: output }] };
-          } catch (err: any) {
-            api.logger?.error?.(
-              `[luckee] tool failed: query="${safePreview(query)}" error=${String(err?.message || err)}`
-            );
-            throw err;
-          }
-        }
-
-        try {
-          const runtimeCfg: LuckeeConfig =
-            api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
-          await ensureTokenStoreLoaded(api, runtimeCfg);
-          if (params?.token && String(params.token).trim()) {
-            persistedDefaultToken = String(params.token).trim();
-            await writeTokenStore(runtimeCfg);
-            api.logger?.info?.("[luckee] persisted default token from tool invocation.");
-          }
-
-          const senderKey = getSenderKey(ctx);
-          const interruptedExisting = stopTrackedProcess(senderKey);
-          if (interruptedExisting.stopped) {
-            api.logger?.info?.(
-              `[luckee] tool interrupted prior ${interruptedExisting.kind || "process"} for sender=${hashSenderKey(senderKey).slice(0, 8)} query="${safePreview(interruptedExisting.query || "", 80)}"`
-            );
-          }
-          const storedToken =
-            tokenBySender.get(senderKey) ||
-            persistedTokenBySenderHash.get(hashSenderKey(senderKey));
-          const effectiveToken =
-            params.token || storedToken || runtimeCfg.defaultToken || persistedDefaultToken;
-
-          const { cfg, args } = resolveLuckeeInvocation(api, {
-            ...params,
-            token: effectiveToken,
-          });
-          logLuckeeInvocation(api, "tool", {
-            query: safePreview(query),
-            hasToken: Boolean(effectiveToken),
-            token: redactToken(String(effectiveToken || "")),
-            channel,
-            streaming: true,
-          });
-
-          const binaryPath = await resolveLuckeeBinaryOrThrow(api, cfg);
-          api.logger?.info?.(`[luckee] tool resolved binary: ${binaryPath}`);
-          api.logger?.info?.(
-            `[luckee] tool cli args: ${JSON.stringify(redactCliArgs(args))}`
-          );
-
-          const flushEveryMs = Math.max(300, Number(runtimeCfg.streamFlushMs ?? 1000));
-          let progressMessageId: string | undefined;
-          let accumulated = "";
-          let loadingTick = 0;
-          let loginDetected = false;
-          const abortHandle: { kill: () => void } = { kill: () => {} };
-          if (PUSH_CAPABLE_CHANNELS.has(channel)) {
-            const initText = `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
-            const initResult = await sendProgressMessageEditable(api, ctx, initText);
-            if (initResult.ok && initResult.messageId) {
-              progressMessageId = initResult.messageId;
-              api.logger?.info?.(
-                `[luckee] tool initial progress sent: messageId=${initResult.messageId} channel=${channel}`
-              );
-            }
-          }
-
-          const processKey = getSenderKey(ctx);
-          activeProcesses.set(processKey, { kill: () => abortHandle.kill(), query });
-
-          let resolveAuthWaitReady: ((sessionId: string) => void) | null = null;
-          const authWaitReady = new Promise<string>((resolve) => {
-            resolveAuthWaitReady = resolve;
-          });
-
-          const pushProgress = async (chunk?: string) => {
-            if (loginDetected) return;
-            if (chunk) {
-              accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
-              if (accumulated.length > 3500) {
-                accumulated = `...(truncated old output)\n${accumulated.slice(-3200)}`;
-              }
-            }
-            if (!accumulated && !progressMessageId) return;
-
-            if (detectLoginRequired(accumulated)) {
-              loginDetected = true;
-              const authUrl = extractAuthUrl(accumulated);
-              const loginResult = await sendProgressMessageEditable(
-                api,
-                ctx,
-                buildLoginRequiredMessage(authUrl),
-                progressMessageId
-              );
-              if (loginResult.ok) {
-                progressMessageId = loginResult.messageId || progressMessageId;
-              }
-
-              const session = createAuthWaitSession(
-                query,
-                () => abortHandle.kill(),
-                authUrl,
-                progressMessageId,
-                "tool"
-              );
-              replaceAuthWaitSession(processKey, session);
-              activeProcesses.delete(processKey);
-              resolveAuthWaitReady?.(session.id);
-              resolveAuthWaitReady = null;
-              return;
-            }
-
-            const displayText = accumulated
-              ? normalizeWrappedUrls(accumulated)
-              : `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
-            const progressText = withProgressFooter(displayText, loadingTick);
-            loadingTick += 1;
-
-            const edited = await sendProgressMessageEditable(
-              api, ctx, progressText, progressMessageId
-            );
-            if (edited.ok) {
-              progressMessageId = edited.messageId || progressMessageId;
-            }
-          };
-
-          try {
-            const runPromise = runCommandStreaming(
-              binaryPath,
-              args,
-              async (chunk) => pushProgress(chunk),
-              flushEveryMs,
-              async () => pushProgress(),
-              abortHandle
-            );
-            const runResultPromise: Promise<StreamingRaceResult> = runPromise.then(
-              (output) => ({ kind: "done", output }),
-              (error) => ({ kind: "error", error })
-            );
-            const authResultPromise: Promise<StreamingRaceResult> = authWaitReady.then((sessionId) => ({
-              kind: "auth",
-              sessionId,
-            }));
-            const result = await Promise.race([runResultPromise, authResultPromise]);
-
-            if (result.kind === "auth") {
-              settleDetachedAuthWait({
-                api,
-                ctx,
-                processKey,
-                sessionId: result.sessionId,
-                query,
-                origin: "tool",
-                runPromise,
-                getProgressMessageId: () => progressMessageId,
-                setProgressMessageId: (messageId) => {
-                  progressMessageId = messageId;
-                },
-              });
-              api.logger?.info?.(
-                `[luckee] tool detached auth wait: query="${safePreview(query)}" sessionId=${result.sessionId}`
-              );
-              return {
-                content: [
-                  {
-                    type: "text",
-                    text:
-                      "Luckee authentication is pending in the background. " +
-                      "I posted the auth instructions in chat. After you finish login, ask me again.",
-                  },
-                ],
-              };
-            }
-
-            if (result.kind === "error") {
-              throw result.error;
-            }
-
-            const output = result.output;
-
-            if (progressMessageId) {
-              const finalText = withDoneFooter(
-                normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)
-              );
-              const finalResult = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
-              if (finalResult.ok && finalResult.messageId) {
-                progressMessageId = finalResult.messageId;
-              }
-            }
-
-            api.logger?.info?.(
-              `[luckee] tool success(streamed): query="${safePreview(query)}" outputChars=${output.length}`
-            );
-            return { content: [{ type: "text", text: output }] };
-          } finally {
-            activeProcesses.delete(processKey);
-          }
-        } catch (err: any) {
-          api.logger?.error?.(
-            `[luckee] tool failed: query="${safePreview(query)}" error=${String(err?.message || err)}`
-          );
-          throw err;
-        }
+        const result = await executeLuckeeInteractive(api, params, ctx, "tool");
+        return {
+          content: [
+            {
+              type: "text",
+              text: result.kind === "auth-pending" ? result.message : result.output,
+            },
+          ],
+        };
       },
     }
   );
@@ -1682,28 +1838,11 @@ export default function register(api: any) {
 
         const runtimeCfg: LuckeeConfig =
           api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
-        await ensureTokenStoreLoaded(api, runtimeCfg);
-
-        if (ctx) {
-          const senderKey = getSenderKey(ctx);
-          tokenBySender.set(senderKey, token);
-          persistedTokenBySenderHash.set(hashSenderKey(senderKey), token);
-          api.logger?.info?.(
-            `[luckee] token saved for sender=${hashSenderKey(senderKey).slice(0, 8)}`
-          );
-        } else {
-          persistedDefaultToken = token;
-          api.logger?.info?.("[luckee] token saved as default (no sender context).");
-        }
-
-        await writeTokenStore(runtimeCfg);
         return {
           content: [
             {
               type: "text",
-              text: ctx
-                ? "Token saved for this chat. You can now run your Luckee query."
-                : "Default Luckee token saved.",
+              text: await saveTokenForContext(api, runtimeCfg, token, ctx),
             },
           ],
         };

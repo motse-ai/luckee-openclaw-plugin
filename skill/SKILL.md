@@ -173,7 +173,7 @@ Complete authorization in the browser, then retry the query. If running on a rem
 openclaw config set plugins.entries.luckee-tool.config.defaultToken "<your_token>"
 ```
 
-Note: the preferred user flow is `/luckee <query>` through the agent loop. If auth is missing, `luckee_query` will surface login or token instructions automatically.
+Note: `/luckee <query>` is available as a native plugin slash command. If the command is not available on a given surface, the agent can still fall back to `luckee_query`. If auth is missing, the plugin will surface login or token instructions automatically.
 
 ### Timeout
 
