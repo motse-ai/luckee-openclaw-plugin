@@ -1,7 +1,7 @@
 {
   "name": "luckee-tool",
   "version": "0.1.1",
-  "description": "OpenClaw plugin that exposes the luckee CLI as a tool and chat command for AI assistants",
+  "description": "OpenClaw plugin that exposes the luckee CLI as tools and a skill-backed /luckee command for AI assistants",
   "type": "module",
   "license": "MIT",
   "repository": {

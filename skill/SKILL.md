@@ -69,7 +69,7 @@ Confirm the plugin shows as loaded and the gateway is healthy. Do not ask the us
 
 ## Usage
 
-### Chat command
+### Skill command
 
 ```
 /luckee <query>
@@ -81,10 +81,6 @@ Example: `/luckee 查一下 asin B0DPJMTH4N 的信息 用skills`
 
 ```
 /luckee stop
-```
-or
-```
-/stop
 ```
 
 ### Set a token
@@ -112,7 +108,7 @@ Call the `luckee_query` tool with:
 }
 ```
 
-Only `query` is required. Auth context is handled by CLI/session state (via `luckee login` or the auto-login prompt when running `luckee` commands).
+Only `query` is required. For `/luckee token ...`, first call `luckee_set_token`, then call `luckee_query` if a query was included. Auth context is handled by CLI/session state or the auto-login prompt triggered by `luckee_query`.
 
 ## Token Management
 
@@ -179,7 +175,7 @@ Complete authorization in the browser, then retry the query. If running on a rem
 openclaw config set plugins.entries.luckee-tool.config.defaultToken "<your_token>"
 ```
 
-Note: The `/luckee login` chat command has a 15-second timeout. If the OAuth callback server cannot start properly in the gateway environment (empty `redirect_uri`), it will time out gracefully and suggest using a token instead.
+Note: the preferred user flow is `/luckee <query>` through the agent loop. If auth is missing, `luckee_query` will surface login or token instructions automatically.
 
 ### Timeout
 

@@ -14,7 +14,7 @@ skill/        ClawHub skill (SKILL.md + reference.md for AI agents)
 ## Features
 
 - **`luckee_query` tool** — AI agents can call queries programmatically.
-- **`/luckee` command** — Users can run queries directly from any chat channel.
+- **`/luckee` skill command** — Users can invoke Luckee through the main agent flow instead of bypassing it.
 - **Streaming output** — Real-time progress updates on push-capable channels with editable messages.
 - **Per-sender token management** — Tokens are stored securely per user and persisted across restarts.
 - **Auto-install** — Automatically installs the `luckee-cli` Python package if not found.
@@ -82,7 +82,7 @@ All settings live under `plugins.entries["luckee-tool"].config` in your OpenClaw
 
 ## Usage
 
-### Chat command
+### Skill command
 
 ```
 /luckee 查一下 asin B0FFGNZ36F 的信息 用skills
@@ -102,7 +102,7 @@ All settings live under `plugins.entries["luckee-tool"].config` in your OpenClaw
 
 ### AI tool invocation
 
-AI agents connected to OpenClaw can call the `luckee_query` tool with:
+AI agents connected to OpenClaw can call the `luckee_query` tool directly, or call `luckee_set_token` first when the user provides `/luckee token ...`:
 
 ```json
 {

@@ -14,7 +14,7 @@ skill/        ClawHub 技能（SKILL.md + reference.md，供 AI 代理使用）
 ## 功能特性
 
 - **`luckee_query` 工具** — AI 代理可以通过编程方式调用查询。
-- **`/luckee` 命令** — 用户可在任意聊天渠道中直接执行查询。
+- **`/luckee` 技能命令** — 用户可通过主代理流程调用 Luckee，而不是绕过代理循环直接回复。
 - **流式输出** — 在支持推送的渠道上实时更新进度，支持消息编辑。
 - **按发送者管理 Token** — Token 按用户安全存储，跨重启持久化。
 - **自动安装** — 未找到 `luckee-cli` 时自动通过 pip 安装。
@@ -82,7 +82,7 @@ clawhub install luckee-skill
 
 ## 使用方法
 
-### 聊天命令
+### 技能命令
 
 ```
 /luckee 查一下 asin B0FFGNZ36F 的信息 用skills
@@ -102,7 +102,7 @@ clawhub install luckee-skill
 
 ### AI 工具调用
 
-连接到 OpenClaw 的 AI 代理可以调用 `luckee_query` 工具：
+连接到 OpenClaw 的 AI 代理可以直接调用 `luckee_query`，或者在用户提供 `/luckee token ...` 时先调用 `luckee_set_token`：
 
 ```json
 {
