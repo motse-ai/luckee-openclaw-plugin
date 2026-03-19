@@ -183,7 +183,7 @@ function buildToolChannelCtx(toolCtx: any): any | undefined {
   };
 }
 const FEISHU_CARD_CHUNK_SIZE = 2400;
-const FEISHU_FINAL_OUTPUT_PART_SIZE = 60000;
+const FEISHU_FINAL_OUTPUT_PART_SIZE = Number.POSITIVE_INFINITY;
 
 type LuckeeTokenStore = {
   version: 1;
@@ -603,7 +603,7 @@ function resolveLuckeeInvocation(api: any, params: any): {
   const userId = params.userId || cfg.defaultUserId;
   const language = params.language || cfg.defaultLanguage || "CN";
   const token = params.token || cfg.defaultToken || persistedDefaultToken;
-  const timeout = String(params.timeout || cfg.defaultTimeout || 90);
+  const timeout = params.timeout;
 
   const query = String(params.query ?? "").trim();
   if (!query) {
@@ -618,7 +618,10 @@ function resolveLuckeeInvocation(api: any, params: any): {
   if (url) args.push("--url", url);
   if (userId) args.push("--user-id", userId);
   args.push("--language", language);
-  args.push("--query", query, "--timeout", timeout);
+  args.push("--query", query);
+  if (timeout !== undefined && timeout !== null && String(timeout).trim() !== "") {
+    args.push("--timeout", String(timeout));
+  }
   if (token) args.push("--token", String(token));
 
   return { cfg, args };
@@ -644,7 +647,7 @@ async function executeLuckee(api: any, params: any): Promise<string> {
     token: redactToken(String(params.token || cfg.defaultToken || persistedDefaultToken || "")),
     userId: String(params.userId || cfg.defaultUserId || ""),
     language: String(params.language || cfg.defaultLanguage || "CN"),
-    timeout: Number(params.timeout || cfg.defaultTimeout || 90),
+    timeout: params.timeout ?? null,
     url: String(cfg.defaultUrl || ""),
   });
   const binaryPath = await resolveLuckeeBinaryOrThrow(api, cfg);
