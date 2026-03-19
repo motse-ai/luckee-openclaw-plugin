@@ -1061,13 +1061,11 @@ function buildFeishuCardMarkdownElements(text: string): Array<Record<string, any
   });
   if (status) {
     markdownBlocks.push({
-      tag: "note",
-      elements: [
-        {
-          tag: "lark_md",
-          content: status,
-        },
-      ],
+      tag: "hr",
+    });
+    markdownBlocks.push({
+      tag: "markdown",
+      content: status,
     });
   }
   return markdownBlocks;
