@@ -1,6 +1,6 @@
 {
   "name": "luckee-tool",
-  "version": "0.1.66",
+  "version": "0.1.68",
   "description": "OpenClaw plugin that exposes the luckee CLI as tools and a native /luckee slash command",
   "type": "module",
   "license": "MIT",
