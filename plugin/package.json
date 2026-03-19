@@ -19,7 +19,9 @@
     "ai-tool"
   ],
   "dependencies": {
-    "@sinclair/typebox": "^0.34.41"
+    "@sinclair/typebox": "^0.34.41",
+    "ansi-to-pre": "^1.0.7",
+    "strip-ansi": "^7.2.0"
   },
   "openclaw": {
     "extensions": [
