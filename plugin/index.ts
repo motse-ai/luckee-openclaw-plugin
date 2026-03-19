@@ -262,6 +262,7 @@ function runCommand(
     const spawnTarget = getSpawnTarget(command, args);
     const child = spawn(spawnTarget.command, spawnTarget.args, {
       stdio: ["ignore", "pipe", "pipe"],
+      env: getChildProcessEnv(),
     });
     let aborted = false;
     if (abortHandle) {
@@ -346,6 +347,7 @@ async function runCommandDetailed(
     const spawnTarget = getSpawnTarget(command, args);
     const child = spawn(spawnTarget.command, spawnTarget.args, {
       stdio: ["ignore", "pipe", "pipe"],
+      env: getChildProcessEnv(),
     });
 
     let stdout = "";
@@ -776,6 +778,7 @@ function runCommandStreaming(
     const spawnTarget = getSpawnTarget(command, args);
     const child = spawn(spawnTarget.command, spawnTarget.args, {
       stdio: ["ignore", "pipe", "pipe"],
+      env: getChildProcessEnv(),
     });
     let aborted = false;
     if (abortHandle) {
@@ -872,6 +875,14 @@ function getSpawnTarget(command: string, args: string[]): { command: string; arg
   if (!shouldWrapLuckeeWithScript(command)) {
     return { command, args };
   }
+  if (process.platform === "linux") {
+    // GNU script requires -c for command execution; otherwise flags like
+    // "--language" are parsed as script options instead of Luckee CLI args.
+    return {
+      command: "script",
+      args: ["-q", "-e", "-f", "-c", buildShellCommand(command, args), "/dev/null"],
+    };
+  }
   return {
     command: "script",
     args: ["-q", "/dev/null", command, ...args],
@@ -880,8 +891,25 @@ function getSpawnTarget(command: string, args: string[]): { command: string; arg
 
 function shouldWrapLuckeeWithScript(command: string): boolean {
   if (process.platform === "win32") return false;
+  if (process.env.LUCKEE_DISABLE_SCRIPT_WRAPPER === "1") return false;
   const binaryName = path.basename(command).toLowerCase();
   return binaryName === "luckee" || binaryName === "luckee-cli";
+}
+
+function shellQuote(value: string): string {
+  if (!value.length) return "''";
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function buildShellCommand(command: string, args: string[]): string {
+  return [command, ...args].map((part) => shellQuote(String(part))).join(" ");
+}
+
+function getChildProcessEnv(): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    PYTHONUNBUFFERED: process.env.PYTHONUNBUFFERED ?? "1",
+  };
 }
 
 async function sendProgressMessage(ctx: any, text: string): Promise<boolean> {
