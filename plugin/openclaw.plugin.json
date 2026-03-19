@@ -9,7 +9,7 @@
     "bins": ["luckee"],
     "python": ">=3.10",
     "pip": {
-      "luckee-cli": ">=0.1.0"
+      "luckee-cli": ">=0.1.20260318114829150"
     }
   },
   "configSchema": {

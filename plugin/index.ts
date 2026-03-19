@@ -1021,7 +1021,12 @@ function summarizeFeishuCard(card: Record<string, any>): string {
 }
 
 function stripFeishuPrefix(id: string): string {
-  return id.startsWith("feishu:") ? id.slice(7) : id;
+  let out = id;
+  if (out.startsWith("feishu:") || out.startsWith("lark:")) {
+    out = out.replace(/^(?:feishu|lark):/i, "");
+  }
+  out = out.replace(/^(?:chat|group|channel|user|dm|open_id):/i, "");
+  return out;
 }
 
 function resolveFeishuReceiveId(ctx: any): { receiveId: string; receiveIdType: string } | null {

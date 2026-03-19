@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   bump:
-    if: github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[skip version bump]')
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -19,25 +19,16 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.ref }}
 
-      - name: Skip when version was already changed
-        id: version_files
-        run: |
-          if git rev-parse --verify HEAD^ >/dev/null 2>&1 && git diff --quiet HEAD^ HEAD -- plugin/package.json plugin/package-lock.json plugin/openclaw.plugin.json; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Setup Node.js
-        if: steps.version_files.outputs.changed == 'false'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Bump patch version
-        if: steps.version_files.outputs.changed == 'false'
+      - name: Bump version from commit count
+        id: bump
         run: |
-          node <<'EOF'
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          node <<EOF
           const fs = require('fs');
 
           function readJson(path) {
@@ -45,18 +36,10 @@ jobs:
           }
 
           function writeJson(path, data) {
-            fs.writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`);
+            fs.writeFileSync(path, JSON.stringify(data, null, 2) + '\n');
           }
 
-          function bumpPatch(version) {
-            const match = version.match(/^(\d+)\.(\d+)\.(\d+)$/);
-            if (!match) {
-              throw new Error(`Unsupported version format: ${version}`);
-            }
-
-            const [, major, minor, patch] = match;
-            return `${major}.${minor}.${Number(patch) + 1}`;
-          }
+          const commitCount = ${COMMIT_COUNT};
 
           const packageJsonPath = 'plugin/package.json';
           const lockfilePath = 'plugin/package-lock.json';
@@ -66,7 +49,20 @@ jobs:
           const lockfile = readJson(lockfilePath);
           const manifest = readJson(manifestPath);
 
-          const nextVersion = bumpPatch(manifest.version);
+          const currentVersion = manifest.version;
+          const match = currentVersion.match(/^(\d+)\.(\d+)\.\d+$/);
+          if (!match) {
+            console.error('Unsupported version format: ' + currentVersion);
+            process.exit(1);
+          }
+          const [, major, minor] = match;
+          const nextVersion = major + '.' + minor + '.' + commitCount;
+
+          if (nextVersion === currentVersion) {
+            console.log('Version already at ' + currentVersion + ', nothing to bump.');
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'skipped=true\n');
+            process.exit(0);
+          }
 
           packageJson.version = nextVersion;
           lockfile.version = nextVersion;
@@ -79,12 +75,13 @@ jobs:
           writeJson(lockfilePath, lockfile);
           writeJson(manifestPath, manifest);
 
-          fs.writeFileSync(process.env.GITHUB_ENV, `NEXT_VERSION=${nextVersion}\n`, { flag: 'a' });
-          console.log(`Bumped plugin version to ${nextVersion}`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'skipped=false\n');
+          fs.appendFileSync(process.env.GITHUB_ENV, 'NEXT_VERSION=' + nextVersion + '\n');
+          console.log('Bumped plugin version to ' + nextVersion);
           EOF
 
       - name: Commit and push version bump
-        if: steps.version_files.outputs.changed == 'false'
+        if: steps.bump.outputs.skipped == 'false'
         env:
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
