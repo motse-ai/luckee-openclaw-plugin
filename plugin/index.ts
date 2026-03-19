@@ -112,7 +112,7 @@ const activeProcesses = new Map<string, TrackedProcess>();
 const authWaitSessions = new Map<string, AuthWaitSession>();
 const activeFeishuProgressCards = new Map<string, ActiveFeishuProgressCard>();
 const FEISHU_CARD_CHUNK_SIZE = 2400;
-const FEISHU_FINAL_OUTPUT_PART_SIZE = 60000;
+const FEISHU_FINAL_OUTPUT_PART_SIZE = Number.POSITIVE_INFINITY;
 
 type LuckeeTokenStore = {
   version: 1;
