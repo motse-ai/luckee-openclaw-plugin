@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { Type } from "@sinclair/typebox";
+import { Terminal } from "ansi-to-pre";
+import stripAnsi from "strip-ansi";
 
 type LuckeeConfig = {
   binaryPath?: string;
@@ -82,6 +84,8 @@ type ActiveFeishuProgressCard = {
   text: string;
 };
 
+type CliChunkLogger = (stream: "stdout" | "stderr", chunk: string) => void;
+
 type StreamingRaceResult =
   | { kind: "done"; output: string }
   | { kind: "error"; error: any }
@@ -107,6 +111,8 @@ type LuckeeCommandAction =
 const activeProcesses = new Map<string, TrackedProcess>();
 const authWaitSessions = new Map<string, AuthWaitSession>();
 const activeFeishuProgressCards = new Map<string, ActiveFeishuProgressCard>();
+const FEISHU_CARD_CHUNK_SIZE = 2400;
+const FEISHU_FINAL_OUTPUT_PART_SIZE = 60000;
 
 type LuckeeTokenStore = {
   version: 1;
@@ -146,6 +152,20 @@ function logLuckeeInvocation(api: any, origin: "tool" | "command", info: Record<
     api.logger?.info?.(`[luckee] ${origin} invocation: ${JSON.stringify(info)}`);
   } catch {
     api.logger?.info?.(`[luckee] ${origin} invocation`);
+  }
+}
+
+function logLuckeeCliChunk(
+  api: any,
+  origin: "tool" | "command",
+  stream: "stdout" | "stderr",
+  chunk: string
+): void {
+  if (!chunk) return;
+  try {
+    api.logger?.info?.(`[luckee] ${origin} cli ${stream} chunk=${JSON.stringify(chunk)}`);
+  } catch {
+    api.logger?.info?.(`[luckee] ${origin} cli ${stream} chunk=(unserializable)`);
   }
 }
 
@@ -235,10 +255,12 @@ function getSenderKey(ctx: any): string {
 function runCommand(
   command: string,
   args: string[],
-  abortHandle?: { kill: () => void }
+  abortHandle?: { kill: () => void },
+  onChunk?: CliChunkLogger
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const spawnTarget = getSpawnTarget(command, args);
+    const child = spawn(spawnTarget.command, spawnTarget.args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let aborted = false;
@@ -254,11 +276,23 @@ function runCommand(
     let stderr = "";
 
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
+      const text = chunk.toString();
+      stdout += text;
+      try {
+        onChunk?.("stdout", text);
+      } catch {
+        // Logging hook must never break command execution.
+      }
     });
 
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
+      const text = chunk.toString();
+      stderr += text;
+      try {
+        onChunk?.("stderr", text);
+      } catch {
+        // Logging hook must never break command execution.
+      }
     });
 
     child.on("error", (err) => reject(err));
@@ -269,15 +303,15 @@ function runCommand(
         return;
       }
       if (code === 0) {
-        const out = stdout.trim();
-        const err = stderr.trim();
+        const out = stdout;
+        const err = stderr;
         resolve(out || err || "(luckee completed with empty output)");
         return;
       }
       reject(
         new Error(
           `luckee exited with code ${code}\n` +
-            `${stderr.trim() || stdout.trim() || "no output"}`
+            `${stderr || stdout || "no output"}`
         )
       );
     });
@@ -309,7 +343,8 @@ async function runCommandDetailed(
   args: string[]
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const spawnTarget = getSpawnTarget(command, args);
+    const child = spawn(spawnTarget.command, spawnTarget.args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -427,6 +462,17 @@ function stripStatusFooter(text: string): string {
   );
 }
 
+function extractStatusFooter(text: string): { body: string; status?: string } {
+  const raw = String(text || "");
+  const match = raw.match(
+    /\n\n---\n(⏳ Still loading\.{1,3}|✅ Completed|⏹️ Stopped)\s*$/s
+  );
+  if (!match) return { body: raw };
+  const status = String(match[1] || "").trim();
+  const body = raw.slice(0, match.index).trimEnd();
+  return { body, status };
+}
+
 function buildStoppedCardText(currentText: string, stoppedText: string): string {
   const statusText = String(stoppedText || "").trim() || "当前查询已停止。";
   const previousText = stripStatusFooter(currentText || "").trim();
@@ -524,7 +570,12 @@ async function executeLuckee(api: any, params: any): Promise<string> {
     activeProcesses.set(senderKey, { kill: () => abortHandle.kill(), query: String(params.query ?? "").trim() });
   }
   try {
-    return await runCommand(binaryPath, args, senderKey ? abortHandle : undefined);
+    return await runCommand(
+      binaryPath,
+      args,
+      senderKey ? abortHandle : undefined,
+      (stream, chunk) => logLuckeeCliChunk(api, origin, stream, chunk)
+    );
   } finally {
     if (senderKey) {
       activeProcesses.delete(senderKey);
@@ -718,10 +769,12 @@ function runCommandStreaming(
   onFlush: (chunk: string) => Promise<void>,
   flushEveryMs = 2500,
   onTick?: () => Promise<void>,
-  abortHandle?: { kill: () => void }
+  abortHandle?: { kill: () => void },
+  onChunk?: CliChunkLogger
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const spawnTarget = getSpawnTarget(command, args);
+    const child = spawn(spawnTarget.command, spawnTarget.args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
     let aborted = false;
@@ -737,7 +790,7 @@ function runCommandStreaming(
     let pending = "";
 
     const flush = async () => {
-      const text = pending.trim();
+      const text = pending;
       if (!text) return;
       pending = "";
       const chunks = splitChunks(text);
@@ -762,12 +815,22 @@ function runCommandStreaming(
       const text = chunk.toString();
       stdout += text;
       pending += text;
+      try {
+        onChunk?.("stdout", text);
+      } catch {
+        // Logging hook must never break command execution.
+      }
     });
 
     child.stderr.on("data", (chunk) => {
       const text = chunk.toString();
       stderr += text;
       pending += text;
+      try {
+        onChunk?.("stderr", text);
+      } catch {
+        // Logging hook must never break command execution.
+      }
     });
 
     child.on("error", (err) => {
@@ -788,21 +851,37 @@ function runCommandStreaming(
             return;
           }
           if (code === 0) {
-            const out = stdout.trim();
-            const err = stderr.trim();
+            const out = stdout;
+            const err = stderr;
             resolve(out || err || "(luckee completed with empty output)");
             return;
           }
           reject(
             new Error(
               `luckee exited with code ${code}\n` +
-                `${stderr.trim() || stdout.trim() || "no output"}`
+                `${stderr || stdout || "no output"}`
             )
           );
         })
         .catch(reject);
     });
   });
+}
+
+function getSpawnTarget(command: string, args: string[]): { command: string; args: string[] } {
+  if (!shouldWrapLuckeeWithScript(command)) {
+    return { command, args };
+  }
+  return {
+    command: "script",
+    args: ["-q", "/dev/null", command, ...args],
+  };
+}
+
+function shouldWrapLuckeeWithScript(command: string): boolean {
+  if (process.platform === "win32") return false;
+  const binaryName = path.basename(command).toLowerCase();
+  return binaryName === "luckee" || binaryName === "luckee-cli";
 }
 
 async function sendProgressMessage(ctx: any, text: string): Promise<boolean> {
@@ -942,11 +1021,58 @@ function buildMessageArgs(ctx: any, text: string): string[] {
   return args;
 }
 
+function sanitizeFeishuCardText(text: string): string {
+  return String(text || "").replace(/```/g, "``\\`");
+}
+
+function renderTerminalOutputText(text: string): string {
+  const raw = String(text || "");
+  if (!raw.trim()) return "(empty output)";
+  try {
+    const terminal = new Terminal();
+    terminal.write(raw);
+    const rendered = stripAnsi(String(terminal.ansi || ""))
+      .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, "")
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    return rendered || "(empty output)";
+  } catch {
+    const fallback = stripAnsi(raw)
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    return fallback || "(empty output)";
+  }
+}
+
+function buildFeishuCardMarkdownElements(text: string): Array<Record<string, any>> {
+  const rendered = sanitizeFeishuCardText(renderTerminalOutputText(text));
+  const { body, status } = extractStatusFooter(rendered);
+  const content = body.trim() || "(empty output)";
+  const chunks = splitChunks(content, FEISHU_CARD_CHUNK_SIZE);
+  const markdownBlocks: Array<Record<string, any>> = chunks.map((chunk, idx) => {
+    const total = chunks.length;
+    const prefix = total > 1 ? `Part ${idx + 1}/${total}\n` : "";
+    return {
+      tag: "markdown",
+      content: `${prefix}${chunk}`,
+    };
+  });
+  if (status) {
+    markdownBlocks.push({
+      tag: "hr",
+    });
+    markdownBlocks.push({
+      tag: "markdown",
+      content: status,
+    });
+  }
+  return markdownBlocks;
+}
+
 function buildFeishuCard(text: string, options: FeishuCardOptions = {}): Record<string, any> {
-  const markdownSafeText = text.replace(
-    /(https?:\/\/[^\s<>"`]+)/g,
-    (_m, url: string) => `[Open URL](${url})`
-  );
+  const markdownElements = buildFeishuCardMarkdownElements(text);
   const stopButtonDisabled = Boolean(options.stopButtonDisabled);
   const stopButtonText = options.stopButtonText || "Stop Current Query";
   const stopButton: Record<string, any> = {
@@ -988,13 +1114,7 @@ function buildFeishuCard(text: string, options: FeishuCardOptions = {}): Record<
     },
     body: {
       elements: [
-        {
-          tag: "markdown",
-          content: markdownSafeText,
-        },
-        {
-          tag: "hr",
-        },
+        ...markdownElements,
         //stopButton,
       ],
     },
@@ -1445,6 +1565,67 @@ async function sendProgressMessageEditable(
   return { ok: true, messageId, edited: false };
 }
 
+function createLuckeeTempOutputPath(prefix = "luckee-feishu-output"): string {
+  const suffix = Math.random().toString(36).slice(2, 10);
+  return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${suffix}.log`);
+}
+
+async function sendFeishuFullOutputFromTemp(
+  api: any,
+  ctx: any,
+  fullText: string,
+  prevMessageId?: string,
+  options: FeishuCardOptions = {}
+): Promise<{ ok: boolean; messageId?: string; tempPath?: string }> {
+  const tempPath = createLuckeeTempOutputPath();
+  const normalized = normalizeWrappedUrls(
+    String(fullText || "").trim() || "(luckee completed with empty output)"
+  );
+
+  try {
+    await fs.writeFile(tempPath, normalized, "utf8");
+    const persisted = await fs.readFile(tempPath, "utf8");
+    const parts = splitChunks(
+      persisted || "(luckee completed with empty output)",
+      FEISHU_FINAL_OUTPUT_PART_SIZE
+    );
+
+    let latestMessageId = prevMessageId;
+    let allOk = true;
+    for (let i = 0; i < parts.length; i++) {
+      const isFirst = i === 0;
+      const isLast = i === parts.length - 1;
+      const prefix = parts.length > 1 ? `完整输出 ${i + 1}/${parts.length}\n\n` : "";
+      const body = `${prefix}${parts[i]}`;
+      const text = isLast ? withDoneFooter(body) : body;
+      const result = await sendProgressMessageEditable(
+        api,
+        ctx,
+        text,
+        isFirst ? latestMessageId : undefined,
+        {
+          stopButtonDisabled: true,
+          stopButtonText: options.stopButtonText || "Query Completed",
+        }
+      );
+      allOk = allOk && result.ok;
+      if (result.ok && result.messageId) {
+        latestMessageId = result.messageId;
+      }
+    }
+
+    api.logger?.info?.(
+      `[luckee] feishu full-output sent via temp file: path=${tempPath} chars=${persisted.length} parts=${parts.length}`
+    );
+    return { ok: allOk, messageId: latestMessageId, tempPath };
+  } catch (err: any) {
+    api.logger?.warn?.(
+      `[luckee] feishu full-output temp send failed: path=${tempPath} error=${String(err?.message || err)}`
+    );
+    return { ok: false, messageId: prevMessageId, tempPath };
+  }
+}
+
 function takeTrackedProcess(
   key?: string
 ): { proc?: TrackedProcess; kind?: "active" | "auth" } {
@@ -1674,7 +1855,12 @@ async function executeLuckeeControlAction(
       activeProcesses.set(senderKey, { kill: () => abortHandle.kill(), query: action });
     }
     try {
-      const output = await runCommand(binaryPath, args, senderKey ? abortHandle : undefined);
+      const output = await runCommand(
+        binaryPath,
+        args,
+        senderKey ? abortHandle : undefined,
+        (stream, chunk) => logLuckeeCliChunk(api, origin, stream, chunk)
+      );
       return {
         kind: "done",
         output: normalizeWrappedUrls(output),
@@ -1720,9 +1906,6 @@ async function executeLuckeeControlAction(
   const pushProgress = async (chunk?: string) => {
     if (chunk) {
       accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
-      if (accumulated.length > 3500) {
-        accumulated = `...(truncated old output)\n${accumulated.slice(-3200)}`;
-      }
     }
     const displayText = accumulated
       ? normalizeWrappedUrls(accumulated)
@@ -1743,18 +1926,24 @@ async function executeLuckeeControlAction(
       async (chunk) => pushProgress(chunk),
       flushEveryMs,
       async () => pushProgress(),
-      abortHandle
+      abortHandle,
+      (stream, chunk) => logLuckeeCliChunk(api, origin, stream, chunk)
     );
     const finalText = normalizeWrappedUrls(output);
     if (channel === "feishu") {
-      await disableFeishuStopButton(
+      const delivered = await sendFeishuFullOutputFromTemp(
         api,
-        processKey,
         ctx,
         finalText,
-        action === "login" ? "Login Complete" : "Logout Complete",
-        false
+        progressMessageId,
+        {
+          stopButtonDisabled: true,
+          stopButtonText: action === "login" ? "Login Complete" : "Logout Complete",
+        }
       );
+      if (delivered.ok && delivered.messageId) {
+        progressMessageId = delivered.messageId;
+      }
     } else {
       const edited = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
       if (edited.ok) {
@@ -1883,11 +2072,24 @@ function settleDetachedAuthWait(params: {
     .then(async (output) => {
       const currentSession = authWaitSessions.get(processKey);
       if (!currentSession || currentSession.id !== sessionId) return;
-
-      await updateCard(
-        withDoneFooter(normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)),
-        { stopButtonDisabled: true, stopButtonText: "Query Completed" }
-      );
+      const channel = String(ctx?.channelId || ctx?.channel || "").trim();
+      if (channel === "feishu") {
+        const delivered = await sendFeishuFullOutputFromTemp(
+          api,
+          ctx,
+          output,
+          getProgressMessageId(),
+          { stopButtonDisabled: true, stopButtonText: "Query Completed" }
+        );
+        if (delivered.ok && delivered.messageId) {
+          setProgressMessageId(delivered.messageId);
+        }
+      } else {
+        await updateCard(
+          withDoneFooter(normalizeWrappedUrls(output)),
+          { stopButtonDisabled: true, stopButtonText: "Query Completed" }
+        );
+      }
       authWaitSessions.delete(processKey);
       forgetActiveFeishuProgressCard(processKey);
       api.logger?.info?.(
@@ -2024,9 +2226,6 @@ async function executeLuckeeInteractive(
       if (loginDetected) return;
       if (chunk) {
         accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
-        if (accumulated.length > 3500) {
-          accumulated = `...(truncated old output)\n${accumulated.slice(-3200)}`;
-        }
       }
       if (!accumulated && !progressMessageId) return;
 
@@ -2080,7 +2279,8 @@ async function executeLuckeeInteractive(
         async (chunk) => pushProgress(chunk),
         flushEveryMs,
         async () => pushProgress(),
-        abortHandle
+        abortHandle,
+        (stream, chunk) => logLuckeeCliChunk(api, origin, stream, chunk)
       );
       const runResultPromise: Promise<StreamingRaceResult> = runPromise.then(
         (output) => ({ kind: "done", output }),
@@ -2139,15 +2339,28 @@ async function executeLuckeeInteractive(
       const output = result.output;
 
       if (progressMessageId) {
-        const finalText = withDoneFooter(
-          normalizeWrappedUrls(output.length > 3500 ? output.slice(-3500) : output)
-        );
-        const finalResult = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId, {
-          stopButtonDisabled: true,
-          stopButtonText: "Query Completed",
-        });
-        if (finalResult.ok && finalResult.messageId) {
-          progressMessageId = finalResult.messageId;
+        if (channel === "feishu") {
+          const delivered = await sendFeishuFullOutputFromTemp(
+            api,
+            ctx,
+            output,
+            progressMessageId,
+            { stopButtonDisabled: true, stopButtonText: "Query Completed" }
+          );
+          if (delivered.ok && delivered.messageId) {
+            progressMessageId = delivered.messageId;
+          }
+        } else {
+          const finalText = withDoneFooter(
+            normalizeWrappedUrls(output)
+          );
+          const finalResult = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId, {
+            stopButtonDisabled: true,
+            stopButtonText: "Query Completed",
+          });
+          if (finalResult.ok && finalResult.messageId) {
+            progressMessageId = finalResult.messageId;
+          }
         }
         forgetActiveFeishuProgressCard(processKey, progressMessageId);
       }
