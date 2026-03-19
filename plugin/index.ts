@@ -85,6 +85,10 @@ type ActiveFeishuProgressCard = {
 };
 
 type CliChunkLogger = (stream: "stdout" | "stderr", chunk: string) => void;
+type AbortHandle = {
+  kill: () => void;
+  stopRequested?: boolean;
+};
 
 type StreamingRaceResult =
   | { kind: "done"; output: string }
@@ -111,6 +115,8 @@ type LuckeeCommandAction =
 const activeProcesses = new Map<string, TrackedProcess>();
 const authWaitSessions = new Map<string, AuthWaitSession>();
 const activeFeishuProgressCards = new Map<string, ActiveFeishuProgressCard>();
+const activeProgressMessageIds = new Map<string, string>();
+const discordMessageChannelTargetById = new Map<string, string>();
 const FEISHU_CARD_CHUNK_SIZE = 2400;
 const FEISHU_FINAL_OUTPUT_PART_SIZE = 60000;
 
@@ -255,7 +261,7 @@ function getSenderKey(ctx: any): string {
 function runCommand(
   command: string,
   args: string[],
-  abortHandle?: { kill: () => void },
+  abortHandle?: AbortHandle,
   onChunk?: CliChunkLogger
 ): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -266,11 +272,19 @@ function runCommand(
     });
     let aborted = false;
     if (abortHandle) {
-      abortHandle.kill = () => {
+      const performAbort = () => {
         aborted = true;
         try { child.kill("SIGTERM"); } catch {}
         setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 2000);
       };
+      const requestedBeforeBind = abortHandle.stopRequested === true;
+      abortHandle.kill = () => {
+        abortHandle.stopRequested = true;
+        performAbort();
+      };
+      if (requestedBeforeBind) {
+        performAbort();
+      }
     }
 
     let stdout = "";
@@ -493,6 +507,19 @@ function rememberActiveFeishuProgressCard(
   activeFeishuProgressCards.set(processKey, { messageId, text });
 }
 
+function rememberActiveProgressMessageId(processKey: string, messageId?: string): void {
+  if (!processKey || !messageId) return;
+  activeProgressMessageIds.set(processKey, messageId);
+}
+
+function forgetActiveProgressMessageId(processKey: string, messageId?: string): void {
+  if (!processKey) return;
+  const current = activeProgressMessageIds.get(processKey);
+  if (!current) return;
+  if (messageId && current !== messageId) return;
+  activeProgressMessageIds.delete(processKey);
+}
+
 function forgetActiveFeishuProgressCard(processKey: string, messageId?: string): void {
   const current = activeFeishuProgressCards.get(processKey);
   if (!current) return;
@@ -561,7 +588,12 @@ async function executeLuckee(api: any, params: any): Promise<string> {
     `[luckee] ${origin} cli args: ${JSON.stringify(redactCliArgs(args))}`
   );
   const senderKey = params?.ctx ? getSenderKey(params.ctx) : "";
-  const abortHandle: { kill: () => void } = { kill: () => {} };
+  const abortHandle: AbortHandle = {
+    stopRequested: false,
+    kill: () => {
+      abortHandle.stopRequested = true;
+    },
+  };
   if (senderKey) {
     const interruptedExisting = stopTrackedProcess(senderKey);
     if (interruptedExisting.stopped) {
@@ -771,7 +803,7 @@ function runCommandStreaming(
   onFlush: (chunk: string) => Promise<void>,
   flushEveryMs = 2500,
   onTick?: () => Promise<void>,
-  abortHandle?: { kill: () => void },
+  abortHandle?: AbortHandle,
   onChunk?: CliChunkLogger
 ): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -782,17 +814,29 @@ function runCommandStreaming(
     });
     let aborted = false;
     if (abortHandle) {
-      abortHandle.kill = () => {
+      const performAbort = () => {
         aborted = true;
         try { child.kill("SIGTERM"); } catch {}
         setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 2000);
       };
+      const requestedBeforeBind = abortHandle.stopRequested === true;
+      abortHandle.kill = () => {
+        abortHandle.stopRequested = true;
+        performAbort();
+      };
+      if (requestedBeforeBind) {
+        performAbort();
+      }
     }
     let stdout = "";
     let stderr = "";
     let pending = "";
 
     const flush = async () => {
+      if (abortHandle?.stopRequested) {
+        pending = "";
+        return;
+      }
       const text = pending;
       if (!text) return;
       pending = "";
@@ -806,7 +850,9 @@ function runCommandStreaming(
     const queueFlush = () => {
       queue = queue
         .then(async () => {
+          if (abortHandle?.stopRequested) return;
           await flush();
+          if (abortHandle?.stopRequested) return;
           if (onTick) await onTick();
         })
         .catch(() => undefined);
@@ -815,6 +861,7 @@ function runCommandStreaming(
     const timer = setInterval(queueFlush, flushEveryMs);
 
     child.stdout.on("data", (chunk) => {
+      if (abortHandle?.stopRequested || aborted) return;
       const text = chunk.toString();
       stdout += text;
       pending += text;
@@ -826,6 +873,7 @@ function runCommandStreaming(
     });
 
     child.stderr.on("data", (chunk) => {
+      if (abortHandle?.stopRequested || aborted) return;
       const text = chunk.toString();
       stderr += text;
       pending += text;
@@ -845,7 +893,12 @@ function runCommandStreaming(
       clearInterval(timer);
       queue = queue
         .then(async () => {
+          if (abortHandle?.stopRequested) {
+            pending = "";
+            return;
+          }
           await flush();
+          if (abortHandle?.stopRequested) return;
           if (onTick) await onTick();
         })
         .then(() => {
@@ -998,6 +1051,21 @@ function extractMessageId(payload: any): string | undefined {
   return undefined;
 }
 
+function extractChannelId(payload: any): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const direct = payload.channelId || payload.channel_id;
+  if (direct != null) return String(direct);
+
+  for (const key of Object.keys(payload)) {
+    const value = payload[key];
+    if (value && typeof value === "object") {
+      const nested = extractChannelId(value);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
+}
+
 function extractMessageIdFromRaw(text: string): string | undefined {
   const patterns = [
     /"message_id"\s*:\s*"([^"]+)"/,
@@ -1016,12 +1084,86 @@ function extractMessageIdFromRaw(text: string): string | undefined {
   return undefined;
 }
 
+function extractChannelIdFromRaw(text: string): string | undefined {
+  const patterns = [
+    /"channel_id"\s*:\s*"([^"]+)"/,
+    /"channelId"\s*:\s*"([^"]+)"/,
+    /"channel_id"\s*:\s*'([^']+)'/,
+    /"channelId"\s*:\s*'([^']+)'/,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m?.[1]) return m[1];
+  }
+  return undefined;
+}
+
+function normalizeDiscordTargetCandidate(
+  value: any,
+  defaultKind?: "channel" | "user"
+): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^slash:/i.test(raw)) return "";
+
+  const mentionUser = raw.match(/^<@!?(\d+)>$/);
+  if (mentionUser?.[1]) return `user:${mentionUser[1]}`;
+  const mentionChannel = raw.match(/^<#(\d+)>$/);
+  if (mentionChannel?.[1]) return `channel:${mentionChannel[1]}`;
+
+  const discordScoped = raw.match(/^discord:(.+)$/i);
+  const scoped = discordScoped?.[1]?.trim() || raw;
+
+  const typed = scoped.match(/^(user|channel):(\d+)$/i);
+  if (typed?.[1] && typed?.[2]) {
+    return `${typed[1].toLowerCase()}:${typed[2]}`;
+  }
+
+  if (/^\d+$/.test(scoped) && defaultKind) {
+    return `${defaultKind}:${scoped}`;
+  }
+  return "";
+}
+
+function resolveDiscordMessageTarget(ctx: any): string {
+  const channelCandidates = [
+    ctx.chatId,
+    ctx.chat_id,
+    ctx.channelTarget,
+    ctx.channel_id,
+    ctx.threadId,
+    ctx.thread_id,
+  ];
+  for (const candidate of channelCandidates) {
+    const normalized = normalizeDiscordTargetCandidate(candidate, "channel");
+    if (normalized) return normalized;
+  }
+
+  // `to` on Discord slash invocations is often not a routable channel id.
+  // Accept it only when it is explicitly typed (user:/channel:) or mention-like.
+  const explicitTo = normalizeDiscordTargetCandidate(ctx.to);
+  if (explicitTo) return explicitTo;
+
+  const userCandidates = [
+    ctx.from,
+    ctx.senderId,
+  ];
+  for (const candidate of userCandidates) {
+    const normalized = normalizeDiscordTargetCandidate(candidate, "user");
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
 function resolveMessageTarget(ctx: any): string {
   const channel = String(ctx.channelId || ctx.channel || "").trim();
   if (channel === "feishu") {
     return String(
       ctx.chatId || ctx.chat_id || ctx.to || ctx.from || ctx.senderId || ""
     ).trim();
+  }
+  if (channel === "discord") {
+    return resolveDiscordMessageTarget(ctx);
   }
   return String(ctx.to || ctx.from || ctx.senderId || "").trim();
 }
@@ -1033,9 +1175,9 @@ function canPushLuckeeUpdates(ctx?: any): boolean {
   return Boolean(channel && target && PUSH_CAPABLE_CHANNELS.has(channel));
 }
 
-function buildMessageArgs(ctx: any, text: string): string[] {
+function buildMessageArgs(ctx: any, text: string, targetOverride?: string): string[] {
   const channel = String(ctx.channelId || ctx.channel || "").trim();
-  const target = resolveMessageTarget(ctx);
+  const target = String(targetOverride || resolveMessageTarget(ctx)).trim();
   const args = [
     "--channel",
     channel,
@@ -1072,6 +1214,10 @@ function renderTerminalOutputText(text: string): string {
       .trim();
     return fallback || "(empty output)";
   }
+}
+
+function renderLuckeeUserFacingText(text: string): string {
+  return normalizeWrappedUrls(renderTerminalOutputText(text));
 }
 
 function buildFeishuCardMarkdownElements(text: string): Array<Record<string, any>> {
@@ -1536,10 +1682,22 @@ async function sendProgressMessageEditable(
       );
       return { ok: false, messageId: prevMessageId, edited: false };
     }
+    let editTarget = target;
+    if (channel === "discord") {
+      editTarget =
+        discordMessageChannelTargetById.get(prevMessageId) ||
+        (target.startsWith("channel:") ? target : "");
+      if (!editTarget) {
+        api.logger?.warn?.(
+          `[luckee] edit skipped for discord messageId=${prevMessageId}: missing channel target`
+        );
+        return { ok: false, messageId: prevMessageId, edited: false };
+      }
+    }
     const editArgs = [
       "message",
       "edit",
-      ...buildMessageArgs(ctx, text),
+      ...buildMessageArgs(ctx, text, editTarget),
       "--message-id",
       prevMessageId,
       "--json",
@@ -1587,6 +1745,24 @@ async function sendProgressMessageEditable(
     extractMessageId(payload) ||
     extractMessageIdFromRaw(result.stdout) ||
     extractMessageIdFromRaw(result.stderr);
+  if (channel === "discord" && messageId) {
+    const payloadChannelId =
+      extractChannelId(payload) ||
+      extractChannelIdFromRaw(result.stdout) ||
+      extractChannelIdFromRaw(result.stderr);
+    const normalizedPayloadTarget = normalizeDiscordTargetCandidate(
+      payloadChannelId,
+      "channel"
+    );
+    const knownTarget = target.startsWith("channel:") ? target : "";
+    const resolvedChannelTarget = normalizedPayloadTarget || knownTarget;
+    if (resolvedChannelTarget) {
+      discordMessageChannelTargetById.set(messageId, resolvedChannelTarget);
+      api.logger?.info?.(
+        `[luckee] cached discord message target: messageId=${messageId} target=${resolvedChannelTarget}`
+      );
+    }
+  }
   api.logger?.info?.(
     `[luckee] openclaw send ok: channel=${channel} messageId=${messageId || "none"}`
   );
@@ -1798,6 +1974,7 @@ async function disableFeishuStopButton(
 
 async function handleLuckeeStop(api: any, ctx?: any): Promise<string> {
   const processKey = ctx ? getSenderKey(ctx) : "";
+  const channel = String(ctx?.channelId || ctx?.channel || "").trim();
   const stopped = stopTrackedProcess(processKey);
   if (stopped.stopped) {
     api.logger?.info?.(
@@ -1809,7 +1986,25 @@ async function handleLuckeeStop(api: any, ctx?: any): Promise<string> {
       ? `已停止登录等待: ${safePreview(stopped.query || "", 50)}`
       : `已停止查询: ${safePreview(stopped.query || "", 50)}`
     : "当前没有正在运行的查询。";
-  if (processKey) {
+  if (processKey && channel !== "feishu") {
+    const progressMessageId = activeProgressMessageIds.get(processKey);
+    if (progressMessageId) {
+      const result = await sendProgressMessageEditable(
+        api,
+        ctx,
+        withStoppedFooter(text),
+        progressMessageId,
+        {
+          stopButtonDisabled: true,
+          stopButtonText: stopped.stopped ? "Query Stopped" : "No Active Query",
+        }
+      );
+      if (result.ok) {
+        forgetActiveProgressMessageId(processKey, progressMessageId);
+      }
+    }
+  }
+  if (processKey && channel === "feishu") {
     await disableFeishuStopButton(
       api,
       processKey,
@@ -1872,7 +2067,12 @@ async function executeLuckeeControlAction(
   api.logger?.info?.(`[luckee] ${origin} cli args: ${JSON.stringify(args)}`);
 
   if (!canPush) {
-    const abortHandle: { kill: () => void } = { kill: () => {} };
+    const abortHandle: AbortHandle = {
+      stopRequested: false,
+      kill: () => {
+        abortHandle.stopRequested = true;
+      },
+    };
     if (senderKey) {
       const interruptedExisting = stopTrackedProcess(senderKey);
       if (interruptedExisting.stopped) {
@@ -1891,7 +2091,7 @@ async function executeLuckeeControlAction(
       );
       return {
         kind: "done",
-        output: normalizeWrappedUrls(output),
+        output: renderLuckeeUserFacingText(output),
         usedPush: false,
       };
     } catch (err: any) {
@@ -1911,7 +2111,12 @@ async function executeLuckeeControlAction(
   }
 
   const processKey = senderKey;
-  const abortHandle: { kill: () => void } = { kill: () => {} };
+  const abortHandle: AbortHandle = {
+    stopRequested: false,
+    kill: () => {
+      abortHandle.stopRequested = true;
+    },
+  };
   const interruptedExisting = stopTrackedProcess(processKey);
   if (interruptedExisting.stopped) {
     api.logger?.info?.(
@@ -1923,27 +2128,36 @@ async function executeLuckeeControlAction(
   let progressMessageId: string | undefined;
   let accumulated = "";
   let loadingTick = 0;
+  let lastProgressDisplayText = "";
   const initText = `🔄 正在执行: \`${commandLabel}\`\n\n请稍候...`;
   const initResult = await sendProgressMessageEditable(api, ctx, initText);
   if (initResult.ok && initResult.messageId) {
     progressMessageId = initResult.messageId;
     rememberActiveFeishuProgressCard(processKey, initResult.messageId, initText);
+    rememberActiveProgressMessageId(processKey, initResult.messageId);
+    lastProgressDisplayText = initText;
   }
   activeProcesses.set(processKey, { kill: () => abortHandle.kill(), query: action });
 
   const pushProgress = async (chunk?: string) => {
+    if (abortHandle.stopRequested) return;
     if (chunk) {
       accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
     }
     const displayText = accumulated
-      ? normalizeWrappedUrls(accumulated)
+      ? renderLuckeeUserFacingText(accumulated)
       : `🔄 正在执行: \`${commandLabel}\`\n\n请稍候...`;
+    if (displayText === lastProgressDisplayText) {
+      return;
+    }
     const progressText = withProgressFooter(displayText, loadingTick);
     loadingTick += 1;
     const edited = await sendProgressMessageEditable(api, ctx, progressText, progressMessageId);
     if (edited.ok) {
       progressMessageId = edited.messageId || progressMessageId;
       rememberActiveFeishuProgressCard(processKey, progressMessageId, progressText);
+      rememberActiveProgressMessageId(processKey, progressMessageId);
+      lastProgressDisplayText = displayText;
     }
   };
 
@@ -1957,7 +2171,7 @@ async function executeLuckeeControlAction(
       abortHandle,
       (stream, chunk) => logLuckeeCliChunk(api, origin, stream, chunk)
     );
-    const finalText = normalizeWrappedUrls(output);
+    const finalText = renderLuckeeUserFacingText(output);
     if (channel === "feishu") {
       const delivered = await sendFeishuFullOutputFromTemp(
         api,
@@ -1971,13 +2185,16 @@ async function executeLuckeeControlAction(
       );
       if (delivered.ok && delivered.messageId) {
         progressMessageId = delivered.messageId;
+        rememberActiveProgressMessageId(processKey, progressMessageId);
       }
     } else {
       const edited = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
       if (edited.ok) {
         progressMessageId = edited.messageId || progressMessageId;
+        rememberActiveProgressMessageId(processKey, progressMessageId);
       }
     }
+    forgetActiveProgressMessageId(processKey, progressMessageId);
     forgetActiveFeishuProgressCard(processKey, progressMessageId);
     return { kind: "done", output: finalText, usedPush: true };
   } catch (err: any) {
@@ -1995,11 +2212,13 @@ async function executeLuckeeControlAction(
       } else {
         await sendProgressMessageEditable(api, ctx, stoppedText, progressMessageId);
       }
+      forgetActiveProgressMessageId(processKey, progressMessageId);
       forgetActiveFeishuProgressCard(processKey, progressMessageId);
       return { kind: "stopped", output: stoppedText, usedPush: true };
     }
     throw err;
   } finally {
+    forgetActiveProgressMessageId(processKey);
     activeProcesses.delete(processKey);
   }
 }
@@ -2088,7 +2307,8 @@ function settleDetachedAuthWait(params: {
     const result = await sendProgressMessageEditable(api, ctx, text, currentMessageId, options);
     if (result.ok && result.messageId) {
       setProgressMessageId(result.messageId);
-        rememberActiveFeishuProgressCard(processKey, result.messageId, text);
+      rememberActiveFeishuProgressCard(processKey, result.messageId, text);
+      rememberActiveProgressMessageId(processKey, result.messageId);
       const latest = authWaitSessions.get(processKey);
       if (latest && latest.id === sessionId) {
         latest.messageId = result.messageId;
@@ -2111,14 +2331,16 @@ function settleDetachedAuthWait(params: {
         );
         if (delivered.ok && delivered.messageId) {
           setProgressMessageId(delivered.messageId);
+          rememberActiveProgressMessageId(processKey, delivered.messageId);
         }
       } else {
         await updateCard(
-          withDoneFooter(normalizeWrappedUrls(output)),
+          withDoneFooter(renderLuckeeUserFacingText(output)),
           { stopButtonDisabled: true, stopButtonText: "Query Completed" }
         );
       }
       authWaitSessions.delete(processKey);
+      forgetActiveProgressMessageId(processKey, getProgressMessageId());
       forgetActiveFeishuProgressCard(processKey);
       api.logger?.info?.(
         `[luckee] ${origin} success(detached auth wait): query="${safePreview(query)}" outputChars=${output.length}`
@@ -2141,6 +2363,7 @@ function settleDetachedAuthWait(params: {
         stopButtonText: "Query Failed",
       });
       authWaitSessions.delete(processKey);
+      forgetActiveProgressMessageId(processKey, getProgressMessageId());
       forgetActiveFeishuProgressCard(processKey);
       api.logger?.info?.(
         `[luckee] ${origin} detached auth wait failed: query="${safePreview(query)}" error=${safePreview(errMsg, 200)}`
@@ -2231,14 +2454,22 @@ async function executeLuckeeInteractive(
     let progressMessageId: string | undefined;
     let accumulated = "";
     let loadingTick = 0;
+    let lastProgressDisplayText = "";
     let loginDetected = false;
     const processKey = senderKey;
-    const abortHandle: { kill: () => void } = { kill: () => {} };
+    const abortHandle: AbortHandle = {
+      stopRequested: false,
+      kill: () => {
+        abortHandle.stopRequested = true;
+      },
+    };
     const initText = `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
     const initResult = await sendProgressMessageEditable(api, ctx, initText);
     if (initResult.ok && initResult.messageId) {
       progressMessageId = initResult.messageId;
       rememberActiveFeishuProgressCard(processKey, initResult.messageId, initText);
+      rememberActiveProgressMessageId(processKey, initResult.messageId);
+      lastProgressDisplayText = initText;
       api.logger?.info?.(
         `[luckee] ${origin} initial progress sent: messageId=${initResult.messageId} channel=${channel}`
       );
@@ -2251,6 +2482,7 @@ async function executeLuckeeInteractive(
     });
 
     const pushProgress = async (chunk?: string) => {
+      if (abortHandle.stopRequested) return;
       if (loginDetected) return;
       if (chunk) {
         accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
@@ -2269,6 +2501,7 @@ async function executeLuckeeInteractive(
         if (loginResult.ok) {
           progressMessageId = loginResult.messageId || progressMessageId;
           rememberActiveFeishuProgressCard(processKey, progressMessageId, buildLoginRequiredMessage(authUrl));
+          rememberActiveProgressMessageId(processKey, progressMessageId);
         }
 
         const session = createAuthWaitSession(
@@ -2286,8 +2519,11 @@ async function executeLuckeeInteractive(
       }
 
       const displayText = accumulated
-        ? normalizeWrappedUrls(accumulated)
+        ? renderLuckeeUserFacingText(accumulated)
         : `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
+      if (displayText === lastProgressDisplayText) {
+        return;
+      }
       const progressText = withProgressFooter(displayText, loadingTick);
       loadingTick += 1;
 
@@ -2297,6 +2533,8 @@ async function executeLuckeeInteractive(
       if (edited.ok) {
         progressMessageId = edited.messageId || progressMessageId;
         rememberActiveFeishuProgressCard(processKey, progressMessageId, progressText);
+        rememberActiveProgressMessageId(processKey, progressMessageId);
+        lastProgressDisplayText = displayText;
       }
     };
 
@@ -2348,18 +2586,33 @@ async function executeLuckeeInteractive(
 
       if (result.kind === "error") {
         if (isLuckeeStoppedError(result.error)) {
-          await disableFeishuStopButton(
-            api,
-            processKey,
-            ctx,
-            `已停止查询: ${safePreview(query, 50)}`,
-            "Query Stopped",
-            true
-          );
+          const stoppedText = `已停止查询: ${safePreview(query, 50)}`;
+          if (channel === "feishu") {
+            await disableFeishuStopButton(
+              api,
+              processKey,
+              ctx,
+              stoppedText,
+              "Query Stopped",
+              true
+            );
+          } else {
+            await sendProgressMessageEditable(
+              api,
+              ctx,
+              withStoppedFooter(stoppedText),
+              progressMessageId,
+              {
+                stopButtonDisabled: true,
+                stopButtonText: "Query Stopped",
+              }
+            );
+          }
           api.logger?.info?.(
             `[luckee] ${origin} stopped(streamed): query="${safePreview(query)}"`
           );
-          return { kind: "stopped", output: `已停止查询: ${safePreview(query, 50)}`, usedPush: true };
+          forgetActiveProgressMessageId(processKey, progressMessageId);
+          return { kind: "stopped", output: stoppedText, usedPush: true };
         }
         throw result.error;
       }
@@ -2377,10 +2630,11 @@ async function executeLuckeeInteractive(
           );
           if (delivered.ok && delivered.messageId) {
             progressMessageId = delivered.messageId;
+            rememberActiveProgressMessageId(processKey, progressMessageId);
           }
         } else {
           const finalText = withDoneFooter(
-            normalizeWrappedUrls(output)
+            renderLuckeeUserFacingText(output)
           );
           const finalResult = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId, {
             stopButtonDisabled: true,
@@ -2388,8 +2642,10 @@ async function executeLuckeeInteractive(
           });
           if (finalResult.ok && finalResult.messageId) {
             progressMessageId = finalResult.messageId;
+            rememberActiveProgressMessageId(processKey, progressMessageId);
           }
         }
+        forgetActiveProgressMessageId(processKey, progressMessageId);
         forgetActiveFeishuProgressCard(processKey, progressMessageId);
       }
 
@@ -2398,6 +2654,7 @@ async function executeLuckeeInteractive(
       );
       return { kind: "done", output, usedPush: true };
     } finally {
+      forgetActiveProgressMessageId(processKey);
       activeProcesses.delete(processKey);
     }
   } catch (err: any) {
