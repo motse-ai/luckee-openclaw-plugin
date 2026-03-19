@@ -1,12 +1,16 @@
 {
   "id": "luckee-tool",
   "name": "Luckee Tool",
-  "version": "0.1.2",
+  "version": "0.1.47",
   "description": "Expose luckee CLI as OpenClaw tools plus a native /luckee slash command for product data queries",
-  "skills": ["./skills"],
+  "skills": [
+    "./skills"
+  ],
   "repository": "https://github.com/motse-ai/luckee-openclaw-plugin",
   "requires": {
-    "bins": ["luckee"],
+    "bins": [
+      "luckee"
+    ],
     "python": ">=3.10",
     "pip": {
       "luckee-cli": ">=0.1.20260318114829150"
