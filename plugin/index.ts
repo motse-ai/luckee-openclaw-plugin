@@ -77,6 +77,7 @@ type AuthWaitSession = TrackedProcess & {
 type FeishuCardOptions = {
   stopButtonDisabled?: boolean;
   stopButtonText?: string;
+  title?: string;
 };
 
 type ActiveFeishuProgressCard = {
@@ -85,6 +86,10 @@ type ActiveFeishuProgressCard = {
 };
 
 type CliChunkLogger = (stream: "stdout" | "stderr", chunk: string) => void;
+type AbortHandle = {
+  kill: () => void;
+  stopRequested?: boolean;
+};
 
 type StreamingRaceResult =
   | { kind: "done"; output: string }
@@ -111,6 +116,72 @@ type LuckeeCommandAction =
 const activeProcesses = new Map<string, TrackedProcess>();
 const authWaitSessions = new Map<string, AuthWaitSession>();
 const activeFeishuProgressCards = new Map<string, ActiveFeishuProgressCard>();
+const activeProgressMessageIds = new Map<string, string>();
+const discordMessageChannelTargetById = new Map<string, string>();
+
+type CachedMessageCtx = {
+  channelId: string;
+  conversationId?: string;
+  accountId?: string;
+  from: string;
+  to?: string;
+  threadId?: string | number;
+};
+const lastMessageCtx = new Map<string, CachedMessageCtx>();
+
+function cacheMessageCtx(
+  channelId: string,
+  accountId: string | undefined,
+  from: string,
+  extra?: Partial<CachedMessageCtx>
+): void {
+  if (!channelId || !from) return;
+  const entry: CachedMessageCtx = { channelId, accountId, from, ...extra };
+  const senderKey = `${channelId}|${accountId || ""}|${from}`;
+  lastMessageCtx.set(senderKey, entry);
+  const channelKey = `${channelId}|${accountId || ""}|*`;
+  lastMessageCtx.set(channelKey, entry);
+  if (lastMessageCtx.size > 1000) {
+    const first = lastMessageCtx.keys().next().value;
+    if (first) lastMessageCtx.delete(first);
+  }
+}
+
+function lookupCachedMessageCtx(
+  channel: string,
+  account: string | undefined,
+  sender: string | undefined
+): CachedMessageCtx | undefined {
+  if (sender) {
+    const exact = lastMessageCtx.get(`${channel}|${account || ""}|${sender}`);
+    if (exact) return exact;
+  }
+  return lastMessageCtx.get(`${channel}|${account || ""}|*`);
+}
+
+function buildToolChannelCtx(toolCtx: any): any | undefined {
+  const channel = toolCtx?.messageChannel;
+  const sender = (toolCtx?.requesterSenderId || "").trim() || undefined;
+  const account = (toolCtx?.agentAccountId || "").trim() || undefined;
+  if (!channel) return undefined;
+
+  const cached = lookupCachedMessageCtx(channel, account, sender);
+  const effectiveSender = sender || cached?.from;
+  const target = cached?.conversationId || cached?.to || effectiveSender;
+  if (!target) return undefined;
+
+  return {
+    channel,
+    channelId: channel,
+    from: effectiveSender || target,
+    senderId: effectiveSender || target,
+    to: target,
+    chatId: target,
+    chat_id: target,
+    accountId: account || cached?.accountId,
+    messageThreadId: cached?.threadId,
+  };
+}
 const FEISHU_CARD_CHUNK_SIZE = 2400;
 const FEISHU_FINAL_OUTPUT_PART_SIZE = Number.POSITIVE_INFINITY;
 
@@ -255,7 +326,7 @@ function getSenderKey(ctx: any): string {
 function runCommand(
   command: string,
   args: string[],
-  abortHandle?: { kill: () => void },
+  abortHandle?: AbortHandle,
   onChunk?: CliChunkLogger
 ): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -266,11 +337,19 @@ function runCommand(
     });
     let aborted = false;
     if (abortHandle) {
-      abortHandle.kill = () => {
+      const performAbort = () => {
         aborted = true;
         try { child.kill("SIGTERM"); } catch {}
         setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 2000);
       };
+      const requestedBeforeBind = abortHandle.stopRequested === true;
+      abortHandle.kill = () => {
+        abortHandle.stopRequested = true;
+        performAbort();
+      };
+      if (requestedBeforeBind) {
+        performAbort();
+      }
     }
 
     let stdout = "";
@@ -493,6 +572,19 @@ function rememberActiveFeishuProgressCard(
   activeFeishuProgressCards.set(processKey, { messageId, text });
 }
 
+function rememberActiveProgressMessageId(processKey: string, messageId?: string): void {
+  if (!processKey || !messageId) return;
+  activeProgressMessageIds.set(processKey, messageId);
+}
+
+function forgetActiveProgressMessageId(processKey: string, messageId?: string): void {
+  if (!processKey) return;
+  const current = activeProgressMessageIds.get(processKey);
+  if (!current) return;
+  if (messageId && current !== messageId) return;
+  activeProgressMessageIds.delete(processKey);
+}
+
 function forgetActiveFeishuProgressCard(processKey: string, messageId?: string): void {
   const current = activeFeishuProgressCards.get(processKey);
   if (!current) return;
@@ -564,7 +656,12 @@ async function executeLuckee(api: any, params: any): Promise<string> {
     `[luckee] ${origin} cli args: ${JSON.stringify(redactCliArgs(args))}`
   );
   const senderKey = params?.ctx ? getSenderKey(params.ctx) : "";
-  const abortHandle: { kill: () => void } = { kill: () => {} };
+  const abortHandle: AbortHandle = {
+    stopRequested: false,
+    kill: () => {
+      abortHandle.stopRequested = true;
+    },
+  };
   if (senderKey) {
     const interruptedExisting = stopTrackedProcess(senderKey);
     if (interruptedExisting.stopped) {
@@ -774,7 +871,7 @@ function runCommandStreaming(
   onFlush: (chunk: string) => Promise<void>,
   flushEveryMs = 2500,
   onTick?: () => Promise<void>,
-  abortHandle?: { kill: () => void },
+  abortHandle?: AbortHandle,
   onChunk?: CliChunkLogger
 ): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -785,17 +882,29 @@ function runCommandStreaming(
     });
     let aborted = false;
     if (abortHandle) {
-      abortHandle.kill = () => {
+      const performAbort = () => {
         aborted = true;
         try { child.kill("SIGTERM"); } catch {}
         setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 2000);
       };
+      const requestedBeforeBind = abortHandle.stopRequested === true;
+      abortHandle.kill = () => {
+        abortHandle.stopRequested = true;
+        performAbort();
+      };
+      if (requestedBeforeBind) {
+        performAbort();
+      }
     }
     let stdout = "";
     let stderr = "";
     let pending = "";
 
     const flush = async () => {
+      if (abortHandle?.stopRequested) {
+        pending = "";
+        return;
+      }
       const text = pending;
       if (!text) return;
       pending = "";
@@ -809,7 +918,9 @@ function runCommandStreaming(
     const queueFlush = () => {
       queue = queue
         .then(async () => {
+          if (abortHandle?.stopRequested) return;
           await flush();
+          if (abortHandle?.stopRequested) return;
           if (onTick) await onTick();
         })
         .catch(() => undefined);
@@ -818,6 +929,7 @@ function runCommandStreaming(
     const timer = setInterval(queueFlush, flushEveryMs);
 
     child.stdout.on("data", (chunk) => {
+      if (abortHandle?.stopRequested || aborted) return;
       const text = chunk.toString();
       stdout += text;
       pending += text;
@@ -829,6 +941,7 @@ function runCommandStreaming(
     });
 
     child.stderr.on("data", (chunk) => {
+      if (abortHandle?.stopRequested || aborted) return;
       const text = chunk.toString();
       stderr += text;
       pending += text;
@@ -848,7 +961,12 @@ function runCommandStreaming(
       clearInterval(timer);
       queue = queue
         .then(async () => {
+          if (abortHandle?.stopRequested) {
+            pending = "";
+            return;
+          }
           await flush();
+          if (abortHandle?.stopRequested) return;
           if (onTick) await onTick();
         })
         .then(() => {
@@ -1001,6 +1119,21 @@ function extractMessageId(payload: any): string | undefined {
   return undefined;
 }
 
+function extractChannelId(payload: any): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const direct = payload.channelId || payload.channel_id;
+  if (direct != null) return String(direct);
+
+  for (const key of Object.keys(payload)) {
+    const value = payload[key];
+    if (value && typeof value === "object") {
+      const nested = extractChannelId(value);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
+}
+
 function extractMessageIdFromRaw(text: string): string | undefined {
   const patterns = [
     /"message_id"\s*:\s*"([^"]+)"/,
@@ -1019,12 +1152,86 @@ function extractMessageIdFromRaw(text: string): string | undefined {
   return undefined;
 }
 
+function extractChannelIdFromRaw(text: string): string | undefined {
+  const patterns = [
+    /"channel_id"\s*:\s*"([^"]+)"/,
+    /"channelId"\s*:\s*"([^"]+)"/,
+    /"channel_id"\s*:\s*'([^']+)'/,
+    /"channelId"\s*:\s*'([^']+)'/,
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m?.[1]) return m[1];
+  }
+  return undefined;
+}
+
+function normalizeDiscordTargetCandidate(
+  value: any,
+  defaultKind?: "channel" | "user"
+): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^slash:/i.test(raw)) return "";
+
+  const mentionUser = raw.match(/^<@!?(\d+)>$/);
+  if (mentionUser?.[1]) return `user:${mentionUser[1]}`;
+  const mentionChannel = raw.match(/^<#(\d+)>$/);
+  if (mentionChannel?.[1]) return `channel:${mentionChannel[1]}`;
+
+  const discordScoped = raw.match(/^discord:(.+)$/i);
+  const scoped = discordScoped?.[1]?.trim() || raw;
+
+  const typed = scoped.match(/^(user|channel):(\d+)$/i);
+  if (typed?.[1] && typed?.[2]) {
+    return `${typed[1].toLowerCase()}:${typed[2]}`;
+  }
+
+  if (/^\d+$/.test(scoped) && defaultKind) {
+    return `${defaultKind}:${scoped}`;
+  }
+  return "";
+}
+
+function resolveDiscordMessageTarget(ctx: any): string {
+  const channelCandidates = [
+    ctx.chatId,
+    ctx.chat_id,
+    ctx.channelTarget,
+    ctx.channel_id,
+    ctx.threadId,
+    ctx.thread_id,
+  ];
+  for (const candidate of channelCandidates) {
+    const normalized = normalizeDiscordTargetCandidate(candidate, "channel");
+    if (normalized) return normalized;
+  }
+
+  // `to` on Discord slash invocations is often not a routable channel id.
+  // Accept it only when it is explicitly typed (user:/channel:) or mention-like.
+  const explicitTo = normalizeDiscordTargetCandidate(ctx.to);
+  if (explicitTo) return explicitTo;
+
+  const userCandidates = [
+    ctx.from,
+    ctx.senderId,
+  ];
+  for (const candidate of userCandidates) {
+    const normalized = normalizeDiscordTargetCandidate(candidate, "user");
+    if (normalized) return normalized;
+  }
+  return "";
+}
+
 function resolveMessageTarget(ctx: any): string {
   const channel = String(ctx.channelId || ctx.channel || "").trim();
   if (channel === "feishu") {
     return String(
       ctx.chatId || ctx.chat_id || ctx.to || ctx.from || ctx.senderId || ""
     ).trim();
+  }
+  if (channel === "discord") {
+    return resolveDiscordMessageTarget(ctx);
   }
   return String(ctx.to || ctx.from || ctx.senderId || "").trim();
 }
@@ -1036,9 +1243,9 @@ function canPushLuckeeUpdates(ctx?: any): boolean {
   return Boolean(channel && target && PUSH_CAPABLE_CHANNELS.has(channel));
 }
 
-function buildMessageArgs(ctx: any, text: string): string[] {
+function buildMessageArgs(ctx: any, text: string, targetOverride?: string): string[] {
   const channel = String(ctx.channelId || ctx.channel || "").trim();
-  const target = resolveMessageTarget(ctx);
+  const target = String(targetOverride || resolveMessageTarget(ctx)).trim();
   const args = [
     "--channel",
     channel,
@@ -1075,6 +1282,10 @@ function renderTerminalOutputText(text: string): string {
       .trim();
     return fallback || "(empty output)";
   }
+}
+
+function renderLuckeeUserFacingText(text: string): string {
+  return normalizeWrappedUrls(renderTerminalOutputText(text));
 }
 
 function buildFeishuCardMarkdownElements(text: string): Array<Record<string, any>> {
@@ -1139,7 +1350,7 @@ function buildFeishuCard(text: string, options: FeishuCardOptions = {}): Record<
     header: {
       title: {
         tag: "plain_text",
-        content: "Luckee 流式输出",
+        content: options.title ? `Luckee: ${options.title}` : "Luckee",
       },
       template: "blue",
     },
@@ -1539,10 +1750,22 @@ async function sendProgressMessageEditable(
       );
       return { ok: false, messageId: prevMessageId, edited: false };
     }
+    let editTarget = target;
+    if (channel === "discord") {
+      editTarget =
+        discordMessageChannelTargetById.get(prevMessageId) ||
+        (target.startsWith("channel:") ? target : "");
+      if (!editTarget) {
+        api.logger?.warn?.(
+          `[luckee] edit skipped for discord messageId=${prevMessageId}: missing channel target`
+        );
+        return { ok: false, messageId: prevMessageId, edited: false };
+      }
+    }
     const editArgs = [
       "message",
       "edit",
-      ...buildMessageArgs(ctx, text),
+      ...buildMessageArgs(ctx, text, editTarget),
       "--message-id",
       prevMessageId,
       "--json",
@@ -1590,6 +1813,24 @@ async function sendProgressMessageEditable(
     extractMessageId(payload) ||
     extractMessageIdFromRaw(result.stdout) ||
     extractMessageIdFromRaw(result.stderr);
+  if (channel === "discord" && messageId) {
+    const payloadChannelId =
+      extractChannelId(payload) ||
+      extractChannelIdFromRaw(result.stdout) ||
+      extractChannelIdFromRaw(result.stderr);
+    const normalizedPayloadTarget = normalizeDiscordTargetCandidate(
+      payloadChannelId,
+      "channel"
+    );
+    const knownTarget = target.startsWith("channel:") ? target : "";
+    const resolvedChannelTarget = normalizedPayloadTarget || knownTarget;
+    if (resolvedChannelTarget) {
+      discordMessageChannelTargetById.set(messageId, resolvedChannelTarget);
+      api.logger?.info?.(
+        `[luckee] cached discord message target: messageId=${messageId} target=${resolvedChannelTarget}`
+      );
+    }
+  }
   api.logger?.info?.(
     `[luckee] openclaw send ok: channel=${channel} messageId=${messageId || "none"}`
   );
@@ -1637,6 +1878,7 @@ async function sendFeishuFullOutputFromTemp(
         {
           stopButtonDisabled: true,
           stopButtonText: options.stopButtonText || "Query Completed",
+          title: options.title,
         }
       );
       allOk = allOk && result.ok;
@@ -1781,7 +2023,8 @@ async function disableFeishuStopButton(
   ctx: any,
   fallbackText: string,
   buttonText: string,
-  appendStoppedFooter: boolean
+  appendStoppedFooter: boolean,
+  title?: string
 ): Promise<void> {
   const trackedCard = activeFeishuProgressCards.get(processKey);
   const messageId = trackedCard?.messageId || extractFeishuMessageId(ctx);
@@ -1793,6 +2036,7 @@ async function disableFeishuStopButton(
   const ok = await updateFeishuCardNative(api, messageId, nextText, {
     stopButtonDisabled: true,
     stopButtonText: buttonText,
+    title,
   });
   if (ok) {
     forgetActiveFeishuProgressCard(processKey, trackedCard?.messageId || messageId);
@@ -1801,6 +2045,7 @@ async function disableFeishuStopButton(
 
 async function handleLuckeeStop(api: any, ctx?: any): Promise<string> {
   const processKey = ctx ? getSenderKey(ctx) : "";
+  const channel = String(ctx?.channelId || ctx?.channel || "").trim();
   const stopped = stopTrackedProcess(processKey);
   if (stopped.stopped) {
     api.logger?.info?.(
@@ -1812,14 +2057,35 @@ async function handleLuckeeStop(api: any, ctx?: any): Promise<string> {
       ? `已停止登录等待: ${safePreview(stopped.query || "", 50)}`
       : `已停止查询: ${safePreview(stopped.query || "", 50)}`
     : "当前没有正在运行的查询。";
-  if (processKey) {
+  const stopTitle = stopped.query ? safePreview(stopped.query, 60) : undefined;
+  if (processKey && channel !== "feishu") {
+    const progressMessageId = activeProgressMessageIds.get(processKey);
+    if (progressMessageId) {
+      const result = await sendProgressMessageEditable(
+        api,
+        ctx,
+        withStoppedFooter(text),
+        progressMessageId,
+        {
+          stopButtonDisabled: true,
+          stopButtonText: stopped.stopped ? "Query Stopped" : "No Active Query",
+          title: stopTitle,
+        }
+      );
+      if (result.ok) {
+        forgetActiveProgressMessageId(processKey, progressMessageId);
+      }
+    }
+  }
+  if (processKey && channel === "feishu") {
     await disableFeishuStopButton(
       api,
       processKey,
       ctx,
       text,
       stopped.stopped ? "Query Stopped" : "No Active Query",
-      stopped.stopped
+      stopped.stopped,
+      stopTitle
     );
   }
   return text;
@@ -1875,7 +2141,12 @@ async function executeLuckeeControlAction(
   api.logger?.info?.(`[luckee] ${origin} cli args: ${JSON.stringify(args)}`);
 
   if (!canPush) {
-    const abortHandle: { kill: () => void } = { kill: () => {} };
+    const abortHandle: AbortHandle = {
+      stopRequested: false,
+      kill: () => {
+        abortHandle.stopRequested = true;
+      },
+    };
     if (senderKey) {
       const interruptedExisting = stopTrackedProcess(senderKey);
       if (interruptedExisting.stopped) {
@@ -1894,7 +2165,7 @@ async function executeLuckeeControlAction(
       );
       return {
         kind: "done",
-        output: normalizeWrappedUrls(output),
+        output: renderLuckeeUserFacingText(output),
         usedPush: false,
       };
     } catch (err: any) {
@@ -1914,7 +2185,12 @@ async function executeLuckeeControlAction(
   }
 
   const processKey = senderKey;
-  const abortHandle: { kill: () => void } = { kill: () => {} };
+  const abortHandle: AbortHandle = {
+    stopRequested: false,
+    kill: () => {
+      abortHandle.stopRequested = true;
+    },
+  };
   const interruptedExisting = stopTrackedProcess(processKey);
   if (interruptedExisting.stopped) {
     api.logger?.info?.(
@@ -1926,27 +2202,37 @@ async function executeLuckeeControlAction(
   let progressMessageId: string | undefined;
   let accumulated = "";
   let loadingTick = 0;
+  let lastProgressDisplayText = "";
+  const controlTitle = commandLabel;
   const initText = `🔄 正在执行: \`${commandLabel}\`\n\n请稍候...`;
-  const initResult = await sendProgressMessageEditable(api, ctx, initText);
+  const initResult = await sendProgressMessageEditable(api, ctx, initText, undefined, { title: controlTitle });
   if (initResult.ok && initResult.messageId) {
     progressMessageId = initResult.messageId;
     rememberActiveFeishuProgressCard(processKey, initResult.messageId, initText);
+    rememberActiveProgressMessageId(processKey, initResult.messageId);
+    lastProgressDisplayText = initText;
   }
   activeProcesses.set(processKey, { kill: () => abortHandle.kill(), query: action });
 
   const pushProgress = async (chunk?: string) => {
+    if (abortHandle.stopRequested) return;
     if (chunk) {
       accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
     }
     const displayText = accumulated
-      ? normalizeWrappedUrls(accumulated)
+      ? renderLuckeeUserFacingText(accumulated)
       : `🔄 正在执行: \`${commandLabel}\`\n\n请稍候...`;
+    if (displayText === lastProgressDisplayText) {
+      return;
+    }
     const progressText = withProgressFooter(displayText, loadingTick);
     loadingTick += 1;
-    const edited = await sendProgressMessageEditable(api, ctx, progressText, progressMessageId);
+    const edited = await sendProgressMessageEditable(api, ctx, progressText, progressMessageId, { title: controlTitle });
     if (edited.ok) {
       progressMessageId = edited.messageId || progressMessageId;
       rememberActiveFeishuProgressCard(processKey, progressMessageId, progressText);
+      rememberActiveProgressMessageId(processKey, progressMessageId);
+      lastProgressDisplayText = displayText;
     }
   };
 
@@ -1960,7 +2246,7 @@ async function executeLuckeeControlAction(
       abortHandle,
       (stream, chunk) => logLuckeeCliChunk(api, origin, stream, chunk)
     );
-    const finalText = normalizeWrappedUrls(output);
+    const finalText = renderLuckeeUserFacingText(output);
     if (channel === "feishu") {
       const delivered = await sendFeishuFullOutputFromTemp(
         api,
@@ -1970,17 +2256,21 @@ async function executeLuckeeControlAction(
         {
           stopButtonDisabled: true,
           stopButtonText: action === "login" ? "Login Complete" : "Logout Complete",
+          title: controlTitle,
         }
       );
       if (delivered.ok && delivered.messageId) {
         progressMessageId = delivered.messageId;
+        rememberActiveProgressMessageId(processKey, progressMessageId);
       }
     } else {
-      const edited = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId);
+      const edited = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId, { title: controlTitle });
       if (edited.ok) {
         progressMessageId = edited.messageId || progressMessageId;
+        rememberActiveProgressMessageId(processKey, progressMessageId);
       }
     }
+    forgetActiveProgressMessageId(processKey, progressMessageId);
     forgetActiveFeishuProgressCard(processKey, progressMessageId);
     return { kind: "done", output: finalText, usedPush: true };
   } catch (err: any) {
@@ -1993,16 +2283,19 @@ async function executeLuckeeControlAction(
           ctx,
           stoppedText,
           "Stopped",
-          false
+          false,
+          controlTitle
         );
       } else {
-        await sendProgressMessageEditable(api, ctx, stoppedText, progressMessageId);
+        await sendProgressMessageEditable(api, ctx, stoppedText, progressMessageId, { title: controlTitle });
       }
+      forgetActiveProgressMessageId(processKey, progressMessageId);
       forgetActiveFeishuProgressCard(processKey, progressMessageId);
       return { kind: "stopped", output: stoppedText, usedPush: true };
     }
     throw err;
   } finally {
+    forgetActiveProgressMessageId(processKey);
     activeProcesses.delete(processKey);
   }
 }
@@ -2083,15 +2376,19 @@ function settleDetachedAuthWait(params: {
     setProgressMessageId,
   } = params;
 
+  const authTitle = safePreview(query, 60);
+
   const updateCard = async (text: string, options: FeishuCardOptions = {}) => {
     const currentSession = authWaitSessions.get(processKey);
     if (!currentSession || currentSession.id !== sessionId) return;
     const currentMessageId = getProgressMessageId();
     if (!currentMessageId) return;
-    const result = await sendProgressMessageEditable(api, ctx, text, currentMessageId, options);
+    const mergedOptions = { title: authTitle, ...options };
+    const result = await sendProgressMessageEditable(api, ctx, text, currentMessageId, mergedOptions);
     if (result.ok && result.messageId) {
       setProgressMessageId(result.messageId);
-        rememberActiveFeishuProgressCard(processKey, result.messageId, text);
+      rememberActiveFeishuProgressCard(processKey, result.messageId, text);
+      rememberActiveProgressMessageId(processKey, result.messageId);
       const latest = authWaitSessions.get(processKey);
       if (latest && latest.id === sessionId) {
         latest.messageId = result.messageId;
@@ -2110,18 +2407,20 @@ function settleDetachedAuthWait(params: {
           ctx,
           output,
           getProgressMessageId(),
-          { stopButtonDisabled: true, stopButtonText: "Query Completed" }
+          { stopButtonDisabled: true, stopButtonText: "Query Completed", title: authTitle }
         );
         if (delivered.ok && delivered.messageId) {
           setProgressMessageId(delivered.messageId);
+          rememberActiveProgressMessageId(processKey, delivered.messageId);
         }
       } else {
         await updateCard(
-          withDoneFooter(normalizeWrappedUrls(output)),
+          withDoneFooter(renderLuckeeUserFacingText(output)),
           { stopButtonDisabled: true, stopButtonText: "Query Completed" }
         );
       }
       authWaitSessions.delete(processKey);
+      forgetActiveProgressMessageId(processKey, getProgressMessageId());
       forgetActiveFeishuProgressCard(processKey);
       api.logger?.info?.(
         `[luckee] ${origin} success(detached auth wait): query="${safePreview(query)}" outputChars=${output.length}`
@@ -2144,6 +2443,7 @@ function settleDetachedAuthWait(params: {
         stopButtonText: "Query Failed",
       });
       authWaitSessions.delete(processKey);
+      forgetActiveProgressMessageId(processKey, getProgressMessageId());
       forgetActiveFeishuProgressCard(processKey);
       api.logger?.info?.(
         `[luckee] ${origin} detached auth wait failed: query="${safePreview(query)}" error=${safePreview(errMsg, 200)}`
@@ -2234,14 +2534,23 @@ async function executeLuckeeInteractive(
     let progressMessageId: string | undefined;
     let accumulated = "";
     let loadingTick = 0;
+    let lastProgressDisplayText = "";
     let loginDetected = false;
     const processKey = senderKey;
-    const abortHandle: { kill: () => void } = { kill: () => {} };
+    const abortHandle: AbortHandle = {
+      stopRequested: false,
+      kill: () => {
+        abortHandle.stopRequested = true;
+      },
+    };
+    const cardTitle = safePreview(query, 60);
     const initText = `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
-    const initResult = await sendProgressMessageEditable(api, ctx, initText);
+    const initResult = await sendProgressMessageEditable(api, ctx, initText, undefined, { title: cardTitle });
     if (initResult.ok && initResult.messageId) {
       progressMessageId = initResult.messageId;
       rememberActiveFeishuProgressCard(processKey, initResult.messageId, initText);
+      rememberActiveProgressMessageId(processKey, initResult.messageId);
+      lastProgressDisplayText = initText;
       api.logger?.info?.(
         `[luckee] ${origin} initial progress sent: messageId=${initResult.messageId} channel=${channel}`
       );
@@ -2254,6 +2563,7 @@ async function executeLuckeeInteractive(
     });
 
     const pushProgress = async (chunk?: string) => {
+      if (abortHandle.stopRequested) return;
       if (loginDetected) return;
       if (chunk) {
         accumulated = accumulated ? `${accumulated}${chunk}` : chunk;
@@ -2267,11 +2577,13 @@ async function executeLuckeeInteractive(
           api,
           ctx,
           buildLoginRequiredMessage(authUrl),
-          progressMessageId
+          progressMessageId,
+          { title: cardTitle }
         );
         if (loginResult.ok) {
           progressMessageId = loginResult.messageId || progressMessageId;
           rememberActiveFeishuProgressCard(processKey, progressMessageId, buildLoginRequiredMessage(authUrl));
+          rememberActiveProgressMessageId(processKey, progressMessageId);
         }
 
         const session = createAuthWaitSession(
@@ -2289,17 +2601,22 @@ async function executeLuckeeInteractive(
       }
 
       const displayText = accumulated
-        ? normalizeWrappedUrls(accumulated)
+        ? renderLuckeeUserFacingText(accumulated)
         : `🔄 正在处理: \`${safePreview(query, 80)}\`\n\n请稍候...`;
+      if (displayText === lastProgressDisplayText) {
+        return;
+      }
       const progressText = withProgressFooter(displayText, loadingTick);
       loadingTick += 1;
 
       const edited = await sendProgressMessageEditable(
-        api, ctx, progressText, progressMessageId
+        api, ctx, progressText, progressMessageId, { title: cardTitle }
       );
       if (edited.ok) {
         progressMessageId = edited.messageId || progressMessageId;
         rememberActiveFeishuProgressCard(processKey, progressMessageId, progressText);
+        rememberActiveProgressMessageId(processKey, progressMessageId);
+        lastProgressDisplayText = displayText;
       }
     };
 
@@ -2351,18 +2668,35 @@ async function executeLuckeeInteractive(
 
       if (result.kind === "error") {
         if (isLuckeeStoppedError(result.error)) {
-          await disableFeishuStopButton(
-            api,
-            processKey,
-            ctx,
-            `已停止查询: ${safePreview(query, 50)}`,
-            "Query Stopped",
-            true
-          );
+          const stoppedText = `已停止查询: ${safePreview(query, 50)}`;
+          if (channel === "feishu") {
+            await disableFeishuStopButton(
+              api,
+              processKey,
+              ctx,
+              stoppedText,
+              "Query Stopped",
+              true,
+              cardTitle
+            );
+          } else {
+            await sendProgressMessageEditable(
+              api,
+              ctx,
+              withStoppedFooter(stoppedText),
+              progressMessageId,
+              {
+                stopButtonDisabled: true,
+                stopButtonText: "Query Stopped",
+                title: cardTitle,
+              }
+            );
+          }
           api.logger?.info?.(
             `[luckee] ${origin} stopped(streamed): query="${safePreview(query)}"`
           );
-          return { kind: "stopped", output: `已停止查询: ${safePreview(query, 50)}`, usedPush: true };
+          forgetActiveProgressMessageId(processKey, progressMessageId);
+          return { kind: "stopped", output: stoppedText, usedPush: true };
         }
         throw result.error;
       }
@@ -2376,23 +2710,27 @@ async function executeLuckeeInteractive(
             ctx,
             output,
             progressMessageId,
-            { stopButtonDisabled: true, stopButtonText: "Query Completed" }
+            { stopButtonDisabled: true, stopButtonText: "Query Completed", title: cardTitle }
           );
           if (delivered.ok && delivered.messageId) {
             progressMessageId = delivered.messageId;
+            rememberActiveProgressMessageId(processKey, progressMessageId);
           }
         } else {
           const finalText = withDoneFooter(
-            normalizeWrappedUrls(output)
+            renderLuckeeUserFacingText(output)
           );
           const finalResult = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId, {
             stopButtonDisabled: true,
             stopButtonText: "Query Completed",
+            title: cardTitle,
           });
           if (finalResult.ok && finalResult.messageId) {
             progressMessageId = finalResult.messageId;
+            rememberActiveProgressMessageId(processKey, progressMessageId);
           }
         }
+        forgetActiveProgressMessageId(processKey, progressMessageId);
         forgetActiveFeishuProgressCard(processKey, progressMessageId);
       }
 
@@ -2401,6 +2739,7 @@ async function executeLuckeeInteractive(
       );
       return { kind: "done", output, usedPush: true };
     } finally {
+      forgetActiveProgressMessageId(processKey);
       activeProcesses.delete(processKey);
     }
   } catch (err: any) {
@@ -2432,7 +2771,7 @@ async function startLuckeeInteractiveDetached(
       `[luckee] ${origin} detached failed: query="${safePreview(query)}" error=${safePreview(errMsg, 200)}`
     );
     try {
-      await sendProgressMessageEditable(api, ctx, failText);
+      await sendProgressMessageEditable(api, ctx, failText, undefined, { title: safePreview(query, 60) });
     } catch {
       // Best effort only.
     }
@@ -2441,11 +2780,34 @@ async function startLuckeeInteractiveDetached(
 }
 
 export default function register(api: any) {
+  api.on("message_received", (event: any, ctx: any) => {
+    try {
+      cacheMessageCtx(ctx.channelId, ctx.accountId, event.from, {
+        conversationId: ctx.conversationId,
+        to: (event.metadata?.to as string) ?? undefined,
+        threadId: (event.metadata?.threadId as string | number) ?? undefined,
+      });
+    } catch {
+      // best effort
+    }
+  });
+
   api.registerCommand({
     name: "luckee",
     description: "Run Luckee queries directly from chat.",
     acceptsArgs: true,
     async handler(ctx: any) {
+      cacheMessageCtx(
+        ctx.channelId || ctx.channel,
+        ctx.accountId,
+        ctx.from || ctx.senderId || "",
+        {
+          conversationId: ctx.chatId || ctx.chat_id || ctx.to,
+          to: ctx.to,
+          threadId: ctx.messageThreadId,
+        }
+      );
+
       const parsed = parseLuckeeCommandArgs(resolveLuckeeCommandArgs(ctx));
       const runtimeCfg: LuckeeConfig =
         api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
@@ -2534,10 +2896,15 @@ export default function register(api: any) {
     },
   });
 
-  api.registerTool(
-    {
+  api.registerTool((toolCtx: any) => {
+    const channelCtx = buildToolChannelCtx(toolCtx);
+    api.logger?.info?.(
+      `[luckee] luckee_query factory: messageChannel=${toolCtx?.messageChannel || "?"} sender=${toolCtx?.requesterSenderId || "?"} account=${toolCtx?.agentAccountId || "?"} cachedEntries=${lastMessageCtx.size} resolvedCtx=${channelCtx ? `ch=${channelCtx.channelId} target=${channelCtx.to} from=${channelCtx.from}` : "none"}`
+    );
+    return {
       name: "luckee_query",
-      description: "Run a query through luckee CLI.",
+      description:
+        "Run a query through luckee CLI. This tool can run for a very very long time, so do not set a low timeout.",
       parameters: Type.Object({
         query: Type.String(),
         token: Type.Optional(Type.String()),
@@ -2546,14 +2913,15 @@ export default function register(api: any) {
 
         timeout: Type.Optional(Type.Number()),
       }),
-      async execute(_id: string, params: any, ctx?: any) {
-        if (canPushLuckeeUpdates(ctx)) {
-          const text = await startLuckeeInteractiveDetached(api, params, ctx, "tool");
+      async execute(_id: string, params: any) {
+        const effectiveCtx = channelCtx;
+        if (canPushLuckeeUpdates(effectiveCtx)) {
+          const text = await startLuckeeInteractiveDetached(api, params, effectiveCtx, "tool");
           return {
             content: [{ type: "text", text }],
           };
         }
-        const result = await executeLuckeeInteractive(api, params, ctx, "tool");
+        const result = await executeLuckeeInteractive(api, params, effectiveCtx, "tool");
         return {
           content: [
             {
@@ -2563,11 +2931,12 @@ export default function register(api: any) {
           ],
         };
       },
-    }
-  );
+    };
+  });
 
-  api.registerTool(
-    {
+  api.registerTool((toolCtx: any) => {
+    const channelCtx = buildToolChannelCtx(toolCtx);
+    return {
       name: "luckee_set_token",
       description:
         "Persist a Luckee token for the current chat sender. " +
@@ -2575,7 +2944,7 @@ export default function register(api: any) {
       parameters: Type.Object({
         token: Type.String(),
       }),
-      async execute(_id: string, params: any, ctx?: any) {
+      async execute(_id: string, params: any) {
         const token = String(params.token ?? "").trim();
         if (!token) {
           throw new Error("Missing token.");
@@ -2587,27 +2956,28 @@ export default function register(api: any) {
           content: [
             {
               type: "text",
-              text: await saveTokenForContext(api, runtimeCfg, token, ctx),
+              text: await saveTokenForContext(api, runtimeCfg, token, channelCtx),
             },
           ],
         };
       },
-    }
-  );
+    };
+  });
 
-  api.registerTool(
-    {
+  api.registerTool((toolCtx: any) => {
+    const channelCtx = buildToolChannelCtx(toolCtx);
+    return {
       name: "luckee_stop",
       description:
         "Stop a currently running luckee query. " +
         "Call this tool when the user wants to stop, cancel, or abort a running luckee query.",
       parameters: Type.Object({}),
-      async execute(_id: string, _params: any, ctx?: any) {
-        const stopText = await handleLuckeeStop(api, ctx);
+      async execute(_id: string, _params: any) {
+        const stopText = await handleLuckeeStop(api, channelCtx);
         return {
           content: [{ type: "text", text: stopText }],
         };
       },
-    }
-  );
+    };
+  });
 }

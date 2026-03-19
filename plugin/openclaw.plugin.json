@@ -1,7 +1,7 @@
 {
   "id": "luckee-tool",
   "name": "Luckee Tool",
-  "version": "0.1.68",
+  "version": "0.1.74",
   "description": "Expose luckee CLI as OpenClaw tools plus a native /luckee slash command for product data queries",
   "skills": [
     "./skills"
@@ -48,8 +48,8 @@
       },
       "defaultTimeout": {
         "type": "number",
-        "default": 90,
-        "description": "Query timeout in seconds"
+        "default": 3600,
+        "description": "Query timeout in seconds. luckee_query can run for a very very long time, so do not set a low timeout."
       },
       "streamFlushMs": {
         "type": "number",
