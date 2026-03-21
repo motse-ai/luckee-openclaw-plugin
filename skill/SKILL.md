@@ -1,6 +1,6 @@
 ---
 name: luckee-skill
-description: Operate the Luckee AI cross-border e-commerce assistant via the luckee-tool OpenClaw plugin. Luckee AI is an intelligent assistant for Amazon sellers providing ad diagnosis, keyword research, competitor analysis, listing optimization, and data reporting. Use when the user mentions luckee, Amazon advertising, ad diagnosis/ACOS/ROAS, ASIN lookup, keyword research, competitor analysis, product data queries, listing optimization, campaign analysis, or wants to install/configure the luckee plugin.
+description: Operate the Luckee AI e-commerce assistant via the luckee-tool OpenClaw plugin. Luckee AI is an intelligent assistant for Amazon sellers providing ad diagnosis, keyword research, competitor analysis, listing optimization, and data reporting etc. Use when the user mentions luckee, Amazon advertising, ad diagnosis/ACOS/ROAS, ASIN lookup, keyword research, competitor analysis, product data queries, listing optimization, campaign analysis, or wants to install/configure the luckee plugin.
 ---
 
 # Luckee Skill
@@ -47,10 +47,10 @@ If the plugin has not been cloned yet:
 git clone https://github.com/motse-ai/luckee-openclaw-plugin.git /tmp/luckee-openclaw-plugin
 ```
 
-If the plugin directory already exists, ensure it is on the latest `main` branch:
+If the plugin directory already exists, pull the latest changes:
 
 ```bash
-cd /tmp/luckee-openclaw-plugin && git fetch origin main && git checkout main && git reset --hard origin/main && cd -
+cd /tmp/luckee-openclaw-plugin && git checkout main && git pull --ff-only origin main && cd -
 ```
 
 ### 2. Install the plugin from the local directory
