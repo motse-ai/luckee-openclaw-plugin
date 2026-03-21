@@ -1,9 +1,27 @@
 ---
 name: luckee-skill
-description: Install and operate the luckee-tool OpenClaw plugin for product data queries. Use when the user mentions luckee, ASIN lookup, product data queries, or wants to set up the luckee plugin.
+description: Operate the Luckee AI cross-border e-commerce assistant via the luckee-tool OpenClaw plugin. Luckee AI is an intelligent assistant for Amazon sellers providing ad diagnosis, keyword research, competitor analysis, listing optimization, and data reporting. Use when the user mentions luckee, Amazon advertising, ad diagnosis/ACOS/ROAS, ASIN lookup, keyword research, competitor analysis, product data queries, listing optimization, campaign analysis, or wants to install/configure the luckee plugin.
 ---
 
 # Luckee Skill
+
+## What is Luckee AI
+
+Luckee AI is a cross-border e-commerce intelligent assistant built for Amazon sellers. It combines Amazon advertising optimization with general business intelligence analysis, powered by advanced AI technology.
+
+### Core capabilities
+
+**Amazon Advertising**
+- **Ad Diagnosis** — Campaign health checks, keyword performance analysis, ad placement efficiency (TOS/ROS/PP), ACOS/ROAS breakdown, campaign structure diagnosis, and diagnostic validation.
+- **Keyword Research** — ASIN/category-based keyword collection, search term report analysis, keyword classification and tagging, CVR estimation, negative keyword suggestions, and word-root clustering.
+- **Ad Strategy** — Bid recommendations, budget allocation analysis, campaign strategy generation, portfolio analysis, new product launch ad strategies, and period-over-period comparison.
+- **Competitor Analysis** — Competitor basic info (price, rating, reviews, BSR), competitor keyword analysis, multi-ASIN comparison, listing analysis, review sentiment extraction, and category landscape mapping.
+- **Data & Reports** — Store data retrieval via API, product/ASIN details, campaign/keyword data pulls, structured diagnostic reports, weekly/monthly summaries, and data visualization.
+
+**General Research & Analysis**
+- **Link & Web Analysis** — Amazon listing parsing, analysis of any webpage (1688, AliExpress, standalone sites), and web search for industry trends.
+- **File & Data Analysis** — Excel/CSV analysis (sales, inventory, financials), PDF document interpretation (supplier quotes, contracts, manuals), and image recognition (screenshots, product images, design drafts).
+- **Content Generation** — Listing optimization (title, bullet points, description), copywriting (A+ content, ad copy, emails), and multi-language translation & localization.
 
 ## Pre-flight
 
@@ -17,17 +35,33 @@ If `luckee-tool` appears and shows as enabled, skip straight to **Usage**. Other
 
 ## Install
 
-Before installing, **ask the user for confirmation**: explain that the plugin will be fetched from its GitHub repository and registered with OpenClaw.
+Before installing, **ask the user for confirmation**: explain that the plugin will be cloned from its GitHub repository and registered with OpenClaw.
 
-### 1. Register the plugin with OpenClaw
+> **Note:** `openclaw plugins install` does **not** accept GitHub URLs directly — only npm specs, local directories, or archives are supported. You must clone the repo first, then install from the local path.
+
+### 1. Clone or update the plugin repository
+
+If the plugin has not been cloned yet:
 
 ```bash
-openclaw plugins install https://github.com/motse-ai/luckee-openclaw-plugin
+git clone https://github.com/motse-ai/luckee-openclaw-plugin.git /tmp/luckee-openclaw-plugin
 ```
 
-This single command fetches the plugin and installs its dependencies. Do **not** run `git clone` or `npm install` manually.
+If the plugin directory already exists, ensure it is on the latest `main` branch:
 
-### 2. Verify and configure the luckee CLI binary path
+```bash
+cd /tmp/luckee-openclaw-plugin && git fetch origin main && git checkout main && git reset --hard origin/main && cd -
+```
+
+### 2. Install the plugin from the local directory
+
+```bash
+openclaw plugins install /tmp/luckee-openclaw-plugin
+```
+
+This registers the plugin with OpenClaw and installs its dependencies.
+
+### 3. Verify and configure the luckee CLI binary path
 
 After install, `luckee-cli` (the Python package) may have been placed in a directory that is **not** on the gateway process's PATH (e.g. `~/.local/bin`). The plugin should use the `luckee` binary by default, so you **must** locate the actual binary and set `binaryPath` explicitly if needed:
 
@@ -44,7 +78,7 @@ openclaw config set plugins.entries.luckee-tool.config.binaryPath "/full/path/to
 
 > **Why:** pip often installs scripts into `~/.local/bin/` which many environments (containers, systemd services, SSH sessions) do not include in PATH. Setting `binaryPath` makes the plugin find the binary regardless of PATH.
 
-### 3. Authenticate with Luckee
+### 4. Authenticate with Luckee
 
 Run:
 
@@ -57,7 +91,7 @@ Running regular `luckee` commands also checks login status and will prompt the s
 
 **No browser access (remote machine, headless server, SSH session, etc.):** If the environment cannot open a browser — for example, a remote server, a container, or an SSH session — the `luckee login` command will still print an authorization URL to stdout. You **must** copy the full URL from the terminal output and present it to the user so they can open it in their own browser. Do not attempt to launch a browser in these environments.
 
-### 4. Restart and verify
+### 5. Restart and verify
 
 ```bash
 openclaw gateway restart
