@@ -1,6 +1,6 @@
 ---
 name: luckee-skill
-description: Operate the Luckee AI cross-border e-commerce assistant via the luckee-tool OpenClaw plugin. Luckee AI is an intelligent assistant for Amazon sellers providing ad diagnosis, keyword research, competitor analysis, listing optimization, and data reporting. Use when the user mentions luckee, Amazon advertising, ad diagnosis/ACOS/ROAS, ASIN lookup, keyword research, competitor analysis, product data queries, listing optimization, campaign analysis, or wants to install/configure the luckee plugin.
+description: Operate the Luckee AI e-commerce assistant via the luckee-tool OpenClaw plugin. Luckee AI is an intelligent assistant for Amazon sellers providing ad diagnosis, keyword research, competitor analysis, listing optimization, and data reporting. Use when the user mentions luckee, Amazon advertising, ad diagnosis/ACOS/ROAS, ASIN lookup, keyword research, competitor analysis, product data queries, listing optimization, campaign analysis, or wants to install/configure the luckee plugin.
 ---
 
 # Luckee Skill
