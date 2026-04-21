@@ -226,6 +226,9 @@ function buildToolChannelCtx(toolCtx: any): any | undefined {
 const FEISHU_CARD_CHUNK_SIZE = 2400;
 const FEISHU_FINAL_OUTPUT_PART_SIZE = Number.POSITIVE_INFINITY;
 
+/** luckee CLI `--timeout` is always at least this many seconds: max(agent request, this). */
+const LUCKEE_CLI_MIN_TIMEOUT_SECONDS = 1800;
+
 type LuckeeTokenStore = {
   version: 1;
   defaultToken?: string;
@@ -257,6 +260,45 @@ function createLuckeeStoppedError(): Error & { code: string; luckeeStopped: true
 
 function isLuckeeStoppedError(err: any): boolean {
   return err?.code === "LUCKEE_STOPPED" || err?.luckeeStopped === true;
+}
+
+function isLikelyTimeoutLuckeeError(err: any): boolean {
+  if (err?.code === "ETIMEDOUT" || err?.name === "TimeoutError") return true;
+  const m = String(err?.message || err || "").toLowerCase();
+  return (
+    m.includes("timeout") ||
+    m.includes("timed out") ||
+    m.includes("time out") ||
+    m.includes("deadline exceeded") ||
+    m.includes("read timed out") ||
+    m.includes("connection timed out") ||
+    m.includes("execution time") ||
+    /\b(tool|invocation).{0,48}(timed out|timeout|time limit)\b/i.test(m)
+  );
+}
+
+/** User- and model-facing text when luckee_query throws (timeout, CLI failure, etc.). */
+function formatLuckeeQueryToolFailureMessage(err: any, queryPreview: string): string {
+  const raw = String(err?.message || err || "Unknown error");
+  const qLine = queryPreview.trim()
+    ? `Query (preview): ${queryPreview.trim()}\n\n`
+    : "";
+  if (isLuckeeStoppedError(err)) {
+    return `${qLine}Luckee query was stopped before completion.\n\n${safePreview(raw, 1500)}`;
+  }
+  if (isLikelyTimeoutLuckeeError(err)) {
+    return (
+      `${qLine}` +
+      `Luckee query **timed out** before completion.\n\n` +
+      `The luckee CLI, network, or upstream session reported a timeout. ` +
+      `Retry with a larger \`timeout\` value (seconds) on \`luckee_query\` if the task legitimately needs more time, or suggest the user narrow the query.\n\n` +
+      `---\nTechnical detail:\n${safePreview(raw, 2000)}`
+    );
+  }
+  return (
+    `${qLine}Luckee query **failed** (process exited with an error or could not complete).\n\n` +
+    `---\n${safePreview(raw, 4000)}`
+  );
 }
 
 function logLuckeeInvocation(api: any, origin: "tool" | "command", info: Record<string, any>): void {
@@ -636,6 +678,7 @@ function forgetActiveFeishuProgressCard(processKey: string, messageId?: string):
 function resolveLuckeeInvocation(api: any, params: any): {
   args: string[];
   cfg: LuckeeConfig;
+  effectiveTimeoutSeconds: number;
 } {
   const cfg: LuckeeConfig =
     api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
@@ -644,7 +687,6 @@ function resolveLuckeeInvocation(api: any, params: any): {
   const userId = params.userId || cfg.defaultUserId;
   const language = params.language || cfg.defaultLanguage || "CN";
   const token = params.token || cfg.defaultToken || persistedDefaultToken;
-  const timeout = params.timeout;
 
   const query = String(params.query ?? "").trim();
   if (!query) {
@@ -655,17 +697,25 @@ function resolveLuckeeInvocation(api: any, params: any): {
     api.logger?.warn?.("[luckee] Ignored caller-provided url; enforced defaultUrl from plugin config.");
   }
 
+  const rawTimeout = params.timeout;
+  let requestedSeconds = 0;
+  if (rawTimeout !== undefined && rawTimeout !== null && String(rawTimeout).trim() !== "") {
+    const n = Number(rawTimeout);
+    if (Number.isFinite(n) && n > 0) {
+      requestedSeconds = n;
+    }
+  }
+  const effectiveTimeoutSeconds = Math.max(LUCKEE_CLI_MIN_TIMEOUT_SECONDS, requestedSeconds);
+
   const args: string[] = [];
   if (url) args.push("--url", url);
   if (userId) args.push("--user-id", userId);
   args.push("--language", language);
   args.push("--query", query);
-  if (timeout !== undefined && timeout !== null && String(timeout).trim() !== "") {
-    args.push("--timeout", String(timeout));
-  }
+  args.push("--timeout", String(effectiveTimeoutSeconds));
   if (token) args.push("--token", String(token));
 
-  return { cfg, args };
+  return { cfg, args, effectiveTimeoutSeconds };
 }
 
 async function executeLuckee(api: any, params: any): Promise<string> {
@@ -680,7 +730,7 @@ async function executeLuckee(api: any, params: any): Promise<string> {
       `[luckee] persisted default token from ${(params?.origin ?? "tool")} invocation.`
     );
   }
-  const { cfg, args } = resolveLuckeeInvocation(api, params);
+  const { cfg, args, effectiveTimeoutSeconds } = resolveLuckeeInvocation(api, params);
   const origin = params?.origin === "command" ? "command" : "tool";
   logLuckeeInvocation(api, origin, {
     query: safePreview(String(params.query ?? "")),
@@ -688,7 +738,8 @@ async function executeLuckee(api: any, params: any): Promise<string> {
     token: redactToken(String(params.token || cfg.defaultToken || persistedDefaultToken || "")),
     userId: String(params.userId || cfg.defaultUserId || ""),
     language: String(params.language || cfg.defaultLanguage || "CN"),
-    timeout: params.timeout ?? null,
+    timeoutRequested: params.timeout ?? null,
+    timeoutSecondsEffective: effectiveTimeoutSeconds,
     url: String(cfg.defaultUrl || ""),
   });
   const binaryPath = await resolveLuckeeBinaryOrThrow(api, cfg);
@@ -1331,7 +1382,10 @@ function renderLuckeeUserFacingText(text: string): string {
   return normalizeWrappedUrls(renderTerminalOutputText(text));
 }
 
-function buildFeishuCardMarkdownElements(text: string): Array<Record<string, any>> {
+function buildFeishuCardMarkdownElementsWithMirror(text: string): {
+  elements: Array<Record<string, any>>;
+  plainTextMirror: string;
+} {
   const rendered = sanitizeFeishuCardText(renderTerminalOutputText(text));
   const { body, status } = extractStatusFooter(rendered);
   const content = body.trim() || "(empty output)";
@@ -1353,11 +1407,61 @@ function buildFeishuCardMarkdownElements(text: string): Array<Record<string, any
       content: status,
     });
   }
-  return markdownBlocks;
+
+  const bodyMirror = chunks
+    .map((chunk, idx) => {
+      const total = chunks.length;
+      const prefix = total > 1 ? `Part ${idx + 1}/${total}\n` : "";
+      return `${prefix}${chunk}`;
+    })
+    .join("\n\n");
+  const plainTextMirror = status ? `${bodyMirror}\n\n---\n\n${status}` : bodyMirror;
+
+  return { elements: markdownBlocks, plainTextMirror };
+}
+
+function buildFeishuCardMarkdownElements(text: string): Array<Record<string, any>> {
+  return buildFeishuCardMarkdownElementsWithMirror(text).elements;
+}
+
+/** Plain text matching Feishu card markdown + status layout for the same source string passed to the native card API. */
+function feishuPlainTextFromCardSourceText(text: string): string {
+  return buildFeishuCardMarkdownElementsWithMirror(text).plainTextMirror;
+}
+
+/**
+ * Same segments and source strings as sendFeishuFullOutputFromTemp, concatenated so the agent sees what users see on the final card(s).
+ */
+function feishuToolPlainTextMirroringFinalCards(rawCliOutput: string): string {
+  const normalized = normalizeWrappedUrls(
+    String(rawCliOutput || "").trim() || "(luckee completed with empty output)"
+  );
+  const persisted = normalized;
+  const parts = splitChunks(
+    persisted || "(luckee completed with empty output)",
+    FEISHU_FINAL_OUTPUT_PART_SIZE
+  );
+  const segmentMirrors: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const isLast = i === parts.length - 1;
+    const prefix = parts.length > 1 ? `完整输出 ${i + 1}/${parts.length}\n\n` : "";
+    const body = `${prefix}${parts[i]}`;
+    const text = isLast ? withDoneFooter(body) : body;
+    segmentMirrors.push(feishuPlainTextFromCardSourceText(text));
+  }
+  return segmentMirrors.join("\n\n----------\n\n");
+}
+
+/** Text returned to the agent as the tool result: Feishu card mirror, else same as final normal-chat message (rendered + completed footer). */
+function luckeeToolFacingResultForAgent(rawCliOutput: string, channel: string): string {
+  if (String(channel).trim() === "feishu") {
+    return feishuToolPlainTextMirroringFinalCards(rawCliOutput);
+  }
+  return withDoneFooter(renderLuckeeUserFacingText(rawCliOutput));
 }
 
 function buildFeishuCard(text: string, options: FeishuCardOptions = {}): Record<string, any> {
-  const markdownElements = buildFeishuCardMarkdownElements(text);
+  const markdownElements = buildFeishuCardMarkdownElementsWithMirror(text).elements;
   const stopButtonDisabled = Boolean(options.stopButtonDisabled);
   const stopButtonText = options.stopButtonText || "Stop Current Query";
   const stopButton: Record<string, any> = {
@@ -2526,10 +2630,11 @@ async function executeLuckeeInteractive(
         persistProvidedToken:
           origin === "tool" && Boolean(params?.token && String(params.token).trim()),
       });
+      const doneOutput = luckeeToolFacingResultForAgent(output, channel);
       api.logger?.info?.(
         `[luckee] ${origin} success: query="${safePreview(query)}" outputChars=${output.length}`
       );
-      return { kind: "done", output, usedPush: false };
+      return { kind: "done", output: doneOutput, usedPush: false };
     } catch (err: any) {
       if (isLuckeeStoppedError(err)) {
         api.logger?.info?.(
@@ -2555,7 +2660,7 @@ async function executeLuckeeInteractive(
       );
     }
 
-    const { cfg, args } = resolveLuckeeInvocation(api, {
+    const { cfg, args, effectiveTimeoutSeconds } = resolveLuckeeInvocation(api, {
       ...params,
       token: effectiveToken,
     });
@@ -2565,6 +2670,8 @@ async function executeLuckeeInteractive(
       token: redactToken(String(effectiveToken || "")),
       channel,
       streaming: true,
+      timeoutRequested: params.timeout ?? null,
+      timeoutSecondsEffective: effectiveTimeoutSeconds,
     });
 
     const binaryPath = await resolveLuckeeBinaryOrThrow(api, cfg);
@@ -2777,10 +2884,11 @@ async function executeLuckeeInteractive(
         forgetActiveFeishuProgressCard(processKey, progressMessageId);
       }
 
+      const doneOutput = luckeeToolFacingResultForAgent(output, channel);
       api.logger?.info?.(
         `[luckee] ${origin} success(streamed): query="${safePreview(query)}" outputChars=${output.length}`
       );
-      return { kind: "done", output, usedPush: true };
+      return { kind: "done", output: doneOutput, usedPush: true };
     } finally {
       forgetActiveProgressMessageId(processKey);
       activeProcesses.delete(processKey);
@@ -2947,32 +3055,46 @@ export default function register(api: any) {
     return {
       name: "luckee_query",
       description:
-        "Run a query through luckee CLI. This tool can run for a very very long time, so do not set a low timeout.",
+        "Run a query through luckee CLI. The process timeout passed to luckee is max(your `timeout` seconds, 1800). Omit `timeout` to use 1800s. Long queries may need a higher value.",
       parameters: Type.Object({
         query: Type.String(),
         token: Type.Optional(Type.String()),
         userId: Type.Optional(Type.String()),
         language: Type.Optional(Type.String()),
 
-        timeout: Type.Optional(Type.Number()),
+        timeout: Type.Optional(
+          Type.Number({
+            description:
+              "Requested timeout in seconds; effective value is max(this, 1800).",
+          })
+        ),
       }),
       async execute(_id: string, params: any) {
         const effectiveCtx = channelCtx;
-        if (canPushLuckeeUpdates(effectiveCtx)) {
-          const text = await startLuckeeInteractiveDetached(api, params, effectiveCtx, "tool");
+        const queryPreview = safePreview(String(params?.query ?? ""), 200);
+        try {
+          const result = await executeLuckeeInteractive(api, params, effectiveCtx, "tool");
           return {
-            content: [{ type: "text", text }],
+            content: [
+              {
+                type: "text",
+                text: result.kind === "auth-pending" ? result.message : result.output,
+              },
+            ],
+          };
+        } catch (err: any) {
+          api.logger?.error?.(
+            `[luckee] luckee_query error: ${String(err?.message || err)}`
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: formatLuckeeQueryToolFailureMessage(err, queryPreview),
+              },
+            ],
           };
         }
-        const result = await executeLuckeeInteractive(api, params, effectiveCtx, "tool");
-        return {
-          content: [
-            {
-              type: "text",
-              text: result.kind === "auth-pending" ? result.message : result.output,
-            },
-          ],
-        };
       },
     };
   });
