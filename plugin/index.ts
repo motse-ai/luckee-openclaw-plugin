@@ -226,7 +226,7 @@ function buildToolChannelCtx(toolCtx: any): any | undefined {
 const FEISHU_CARD_CHUNK_SIZE = 2400;
 const FEISHU_FINAL_OUTPUT_PART_SIZE = Number.POSITIVE_INFINITY;
 
-/** luckee CLI `--timeout` is always at least this many seconds: max(agent request, this). */
+/** luckee CLI `--timeout` floor (seconds). Callers may not pass a lower `timeout`; omit to use this value. */
 const LUCKEE_CLI_MIN_TIMEOUT_SECONDS = 1800;
 
 type LuckeeTokenStore = {
@@ -263,6 +263,7 @@ function isLuckeeStoppedError(err: any): boolean {
 }
 
 function isLikelyTimeoutLuckeeError(err: any): boolean {
+  if (err?.code === "LUCKEE_INVALID_TIMEOUT") return false;
   if (err?.code === "ETIMEDOUT" || err?.name === "TimeoutError") return true;
   const m = String(err?.message || err || "").toLowerCase();
   return (
@@ -734,7 +735,20 @@ function resolveLuckeeInvocation(api: any, params: any): {
       requestedSeconds = n;
     }
   }
-  const effectiveTimeoutSeconds = Math.max(LUCKEE_CLI_MIN_TIMEOUT_SECONDS, requestedSeconds);
+  if (
+    requestedSeconds > 0 &&
+    requestedSeconds < LUCKEE_CLI_MIN_TIMEOUT_SECONDS
+  ) {
+    const err = new Error(
+      `luckee_query \`timeout\` must be at least ${LUCKEE_CLI_MIN_TIMEOUT_SECONDS} seconds (received ${requestedSeconds}). Omit \`timeout\` to use ${LUCKEE_CLI_MIN_TIMEOUT_SECONDS}s.`
+    ) as Error & { code: string };
+    err.code = "LUCKEE_INVALID_TIMEOUT";
+    throw err;
+  }
+  const effectiveTimeoutSeconds = Math.max(
+    LUCKEE_CLI_MIN_TIMEOUT_SECONDS,
+    requestedSeconds
+  );
 
   const args: string[] = [];
   if (url) args.push("--url", url);
@@ -2980,7 +2994,7 @@ export default function register(api: any) {
     timeout: Type.Optional(
       Type.Number({
         description:
-          "Requested timeout in seconds; effective value is max(this, 1800).",
+          "Optional. Timeout in seconds; must be >= 1800 if set. Omit to use 1800s.",
       })
     ),
   });
@@ -3101,7 +3115,7 @@ export default function register(api: any) {
     return {
       name: "luckee_query",
       description:
-        "Run a query through luckee CLI. The process timeout passed to luckee is max(your `timeout` seconds, 1800). Omit `timeout` to use 1800s. Long queries may need a higher value.",
+        "Run a query through luckee CLI. `timeout` (seconds) must be >= 1800 if provided; omit it to use 1800s. Long queries may need a larger value.",
       parameters: luckeeQueryInputSchema,
       input: luckeeQueryInputSchema,
       async execute(_id: string, params: any) {
