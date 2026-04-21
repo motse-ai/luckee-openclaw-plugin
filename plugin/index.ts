@@ -159,18 +159,52 @@ function lookupCachedMessageCtx(
   return lastMessageCtx.get(`${channel}|${account || ""}|*`);
 }
 
+/** Cron / isolated tool runs often omit the real sender; placeholders must not become Feishu receive_ids. */
+function isPlaceholderToolActorId(id: string | undefined): boolean {
+  const s = String(id ?? "").trim().toLowerCase();
+  return (
+    !s ||
+    s === "?" ||
+    s === "unknown" ||
+    s === "anonymous" ||
+    s === "none" ||
+    s === "undefined" ||
+    s === "null"
+  );
+}
+
+/**
+ * OpenClaw session keys often embed the Feishu peer id, e.g.
+ * `agent:main:feishu:direct:ou_f159d843ed4d1190628ec29a09f07bcc`.
+ * Plugin tool context does not receive cron `delivery.to`, but `sessionKey` does.
+ */
+function parseFeishuPeerFromOpenClawSessionKey(sessionKey: string | undefined): string | undefined {
+  const s = String(sessionKey ?? "").trim();
+  if (!s) return undefined;
+  const m = s.match(/\b(oc_[0-9a-zA-Z]+|ou_[0-9a-zA-Z]+|on_[0-9a-zA-Z]+)\b/);
+  return m ? m[1] : undefined;
+}
+
 function buildToolChannelCtx(toolCtx: any): any | undefined {
   const channel = toolCtx?.messageChannel;
-  const sender = (toolCtx?.requesterSenderId || "").trim() || undefined;
+  const rawSender = String(toolCtx?.requesterSenderId || "").trim();
+  const sender = isPlaceholderToolActorId(rawSender) ? undefined : rawSender || undefined;
   const account = (toolCtx?.agentAccountId || "").trim() || undefined;
   if (!channel) return undefined;
 
   const cached = lookupCachedMessageCtx(channel, account, sender);
   const effectiveSender = sender || cached?.from;
-  const target = cached?.conversationId || cached?.to || effectiveSender;
-  if (!target) return undefined;
+  let target = cached?.conversationId || cached?.to || effectiveSender;
 
-  return {
+  const isFeishu = String(channel).trim() === "feishu";
+  if (isFeishu && (!target || isPlaceholderToolActorId(String(target)))) {
+    const fromSession = parseFeishuPeerFromOpenClawSessionKey(toolCtx?.sessionKey);
+    if (fromSession) target = fromSession;
+  }
+
+  if (!target || isPlaceholderToolActorId(String(target))) return undefined;
+
+  const ctx = {
     channel,
     channelId: channel,
     from: effectiveSender || target,
@@ -181,6 +215,13 @@ function buildToolChannelCtx(toolCtx: any): any | undefined {
     accountId: account || cached?.accountId,
     messageThreadId: cached?.threadId,
   };
+
+  // Isolated sessions may still have channel=feishu but no routable chat/user id — skip push, return tool text only.
+  if (isFeishu && !resolveFeishuReceiveId(ctx)) {
+    return undefined;
+  }
+
+  return ctx;
 }
 const FEISHU_CARD_CHUNK_SIZE = 2400;
 const FEISHU_FINAL_OUTPUT_PART_SIZE = Number.POSITIVE_INFINITY;
@@ -1240,7 +1281,9 @@ function canPushLuckeeUpdates(ctx?: any): boolean {
   if (!ctx) return false;
   const channel = String(ctx.channelId || ctx.channel || "").trim();
   const target = resolveMessageTarget(ctx);
-  return Boolean(channel && target && PUSH_CAPABLE_CHANNELS.has(channel));
+  if (!channel || !target || !PUSH_CAPABLE_CHANNELS.has(channel)) return false;
+  if (channel === "feishu" && !resolveFeishuReceiveId(ctx)) return false;
+  return true;
 }
 
 function buildMessageArgs(ctx: any, text: string, targetOverride?: string): string[] {
@@ -1398,7 +1441,7 @@ function resolveFeishuReceiveId(ctx: any): { receiveId: string; receiveIdType: s
 
   const candidates = [chatId, rawTo, rawFrom]
     .map((v) => stripFeishuPrefix(v))
-    .filter(Boolean);
+    .filter((id) => Boolean(id) && !isPlaceholderToolActorId(id));
 
   for (const id of candidates) {
     if (id.startsWith("oc_")) return { receiveId: id, receiveIdType: "chat_id" };
