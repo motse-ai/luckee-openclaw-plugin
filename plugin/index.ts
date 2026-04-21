@@ -301,6 +301,35 @@ function formatLuckeeQueryToolFailureMessage(err: any, queryPreview: string): st
   );
 }
 
+/**
+ * OpenClaw plugin tool return shape (primary path for the agent is `result` + `details`).
+ * @see https://openclaw-openclaw.mintlify.app/plugins/tools — `content` kept for compatibility with older docs/examples.
+ */
+function luckeeToolReturnSuccess(text: string) {
+  return {
+    result: "success" as const,
+    details: { text },
+    content: [{ type: "text" as const, text }],
+  };
+}
+
+function luckeeToolReturnPending(text: string) {
+  return {
+    result: "pending" as const,
+    details: { text },
+    content: [{ type: "text" as const, text }],
+  };
+}
+
+function luckeeToolReturnError(text: string) {
+  return {
+    result: "error" as const,
+    error: text,
+    details: { text },
+    content: [{ type: "text" as const, text }],
+  };
+}
+
 function logLuckeeInvocation(api: any, origin: "tool" | "command", info: Record<string, any>): void {
   try {
     api.logger?.info?.(`[luckee] ${origin} invocation: ${JSON.stringify(info)}`);
@@ -2943,6 +2972,23 @@ export default function register(api: any) {
     }
   });
 
+  const luckeeQueryInputSchema = Type.Object({
+    query: Type.String(),
+    token: Type.Optional(Type.String()),
+    userId: Type.Optional(Type.String()),
+    language: Type.Optional(Type.String()),
+    timeout: Type.Optional(
+      Type.Number({
+        description:
+          "Requested timeout in seconds; effective value is max(this, 1800).",
+      })
+    ),
+  });
+  const luckeeSetTokenInputSchema = Type.Object({
+    token: Type.String(),
+  });
+  const luckeeStopInputSchema = Type.Object({});
+
   api.registerCommand({
     name: "luckee",
     description: "Run Luckee queries directly from chat.",
@@ -3056,44 +3102,25 @@ export default function register(api: any) {
       name: "luckee_query",
       description:
         "Run a query through luckee CLI. The process timeout passed to luckee is max(your `timeout` seconds, 1800). Omit `timeout` to use 1800s. Long queries may need a higher value.",
-      parameters: Type.Object({
-        query: Type.String(),
-        token: Type.Optional(Type.String()),
-        userId: Type.Optional(Type.String()),
-        language: Type.Optional(Type.String()),
-
-        timeout: Type.Optional(
-          Type.Number({
-            description:
-              "Requested timeout in seconds; effective value is max(this, 1800).",
-          })
-        ),
-      }),
+      parameters: luckeeQueryInputSchema,
+      input: luckeeQueryInputSchema,
       async execute(_id: string, params: any) {
         const effectiveCtx = channelCtx;
         const queryPreview = safePreview(String(params?.query ?? ""), 200);
         try {
           const result = await executeLuckeeInteractive(api, params, effectiveCtx, "tool");
-          return {
-            content: [
-              {
-                type: "text",
-                text: result.kind === "auth-pending" ? result.message : result.output,
-              },
-            ],
-          };
+          const text =
+            result.kind === "auth-pending" ? result.message : result.output;
+          return result.kind === "auth-pending"
+            ? luckeeToolReturnPending(text)
+            : luckeeToolReturnSuccess(text);
         } catch (err: any) {
           api.logger?.error?.(
             `[luckee] luckee_query error: ${String(err?.message || err)}`
           );
-          return {
-            content: [
-              {
-                type: "text",
-                text: formatLuckeeQueryToolFailureMessage(err, queryPreview),
-              },
-            ],
-          };
+          return luckeeToolReturnError(
+            formatLuckeeQueryToolFailureMessage(err, queryPreview)
+          );
         }
       },
     };
@@ -3106,25 +3133,19 @@ export default function register(api: any) {
       description:
         "Persist a Luckee token for the current chat sender. " +
         "Call this when the user provides `/luckee token <token>` or wants to save/update their token.",
-      parameters: Type.Object({
-        token: Type.String(),
-      }),
+      parameters: luckeeSetTokenInputSchema,
+      input: luckeeSetTokenInputSchema,
       async execute(_id: string, params: any) {
         const token = String(params.token ?? "").trim();
         if (!token) {
-          throw new Error("Missing token.");
+          return luckeeToolReturnError("Missing token.");
         }
 
         const runtimeCfg: LuckeeConfig =
           api?.config?.plugins?.entries?.["luckee-tool"]?.config ?? {};
-        return {
-          content: [
-            {
-              type: "text",
-              text: await saveTokenForContext(api, runtimeCfg, token, channelCtx),
-            },
-          ],
-        };
+        return luckeeToolReturnSuccess(
+          await saveTokenForContext(api, runtimeCfg, token, channelCtx)
+        );
       },
     };
   });
@@ -3136,12 +3157,11 @@ export default function register(api: any) {
       description:
         "Stop a currently running luckee query. " +
         "Call this tool when the user wants to stop, cancel, or abort a running luckee query.",
-      parameters: Type.Object({}),
+      parameters: luckeeStopInputSchema,
+      input: luckeeStopInputSchema,
       async execute(_id: string, _params: any) {
         const stopText = await handleLuckeeStop(api, channelCtx);
-        return {
-          content: [{ type: "text", text: stopText }],
-        };
+        return luckeeToolReturnSuccess(stopText);
       },
     };
   });
