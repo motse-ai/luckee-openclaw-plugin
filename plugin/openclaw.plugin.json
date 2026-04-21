@@ -1,7 +1,7 @@
 {
   "id": "luckee-tool",
   "name": "Luckee Tool",
-  "version": "0.1.105",
+  "version": "0.1.109",
   "description": "Expose luckee CLI as OpenClaw tools plus a native /luckee slash command for product data queries",
   "skills": [
     "./skills"
