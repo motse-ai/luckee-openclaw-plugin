@@ -129,6 +129,41 @@ type CachedMessageCtx = {
 };
 const lastMessageCtx = new Map<string, CachedMessageCtx>();
 
+// ── Attachment state ──────────────────────────────────────────────────────────
+
+type AttachmentRef =
+  | {
+      kind: "feishu_file";
+      messageId: string;
+      fileKey: string;
+      fileType: "file" | "image" | "audio" | "video";
+      fileName: string;
+    }
+  | {
+      kind: "url";
+      url: string;
+      fileName: string;
+    };
+
+/** Pending attachments per sender, cleared when consumed by the next query. */
+const pendingAttachmentsBySender = new Map<string, AttachmentRef[]>();
+
+function pushPendingAttachment(senderKey: string, ref: AttachmentRef): void {
+  const list = pendingAttachmentsBySender.get(senderKey) ?? [];
+  list.push(ref);
+  pendingAttachmentsBySender.set(senderKey, list);
+  if (pendingAttachmentsBySender.size > 500) {
+    const first = pendingAttachmentsBySender.keys().next().value;
+    if (first) pendingAttachmentsBySender.delete(first);
+  }
+}
+
+function popPendingAttachments(senderKey: string): AttachmentRef[] {
+  const refs = pendingAttachmentsBySender.get(senderKey) ?? [];
+  pendingAttachmentsBySender.delete(senderKey);
+  return refs;
+}
+
 function cacheMessageCtx(
   channelId: string,
   accountId: string | undefined,
@@ -757,6 +792,11 @@ function resolveLuckeeInvocation(api: any, params: any): {
   args.push("--query", query);
   args.push("--timeout", String(effectiveTimeoutSeconds));
   if (token) args.push("--token", String(token));
+  if (Array.isArray(params.attachmentPaths)) {
+    for (const p of params.attachmentPaths) {
+      if (p) args.push("--attachment", String(p));
+    }
+  }
 
   return { cfg, args, effectiveTimeoutSeconds };
 }
@@ -1476,8 +1516,11 @@ function feishuPlainTextFromCardSourceText(text: string): string {
  * Same segments and source strings as sendFeishuFullOutputFromTemp, concatenated so the agent sees what users see on the final card(s).
  */
 function feishuToolPlainTextMirroringFinalCards(rawCliOutput: string): string {
-  const normalized = normalizeWrappedUrls(
+  const stripped = stripLuckeeGeneratedFileLines(
     String(rawCliOutput || "").trim() || "(luckee completed with empty output)"
+  );
+  const normalized = normalizeWrappedUrls(
+    stripped || "(luckee completed with empty output)"
   );
   const persisted = normalized;
   const parts = splitChunks(
@@ -2032,6 +2075,162 @@ function createLuckeeTempOutputPath(prefix = "luckee-feishu-output"): string {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${suffix}.log`);
 }
 
+/** True if path looks like ``~/.luckee/<thread_id>/generated_files/<file>`` (resolved). */
+function isAllowedLuckeeArtifactPath(absPath: string): boolean {
+  const n = path.normalize(absPath);
+  const marker = `${path.sep}.luckee${path.sep}`;
+  const gen = `${path.sep}generated_files${path.sep}`;
+  return n.includes(marker) && n.includes(gen);
+}
+
+/** Strip machine-only lines emitted by luckee CLI for OpenClaw file extraction. */
+function stripLuckeeGeneratedFileLines(text: string): string {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .filter((ln) => !/^Generated a file:\s/.test(ln.trim()));
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * Parse absolute artifact paths from luckee CLI stdout (must match
+ * core_agent_loop ``format_generated_line`` / ``~/.luckee/<thread>/generated_files/``).
+ */
+function collectLuckeeArtifactAbsolutePaths(rawOutput: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const re = /^Generated a file:\s.+\s\(([^)]+)\)\s*$/;
+  for (const line of String(rawOutput || "").split(/\r?\n/)) {
+    const m = line.trim().match(re);
+    if (!m) continue;
+    const p = m[1];
+    if (!isAllowedLuckeeArtifactPath(p)) continue;
+    if (seen.has(p)) continue;
+    seen.add(p);
+    out.push(p);
+  }
+  return out;
+}
+
+async function feishuImUploadFileBytes(
+  api: any,
+  token: string,
+  fileName: string,
+  bytes: Buffer
+): Promise<string | null> {
+  try {
+    const form = new FormData();
+    form.append("file_type", "stream");
+    form.append("file_name", fileName);
+    form.append("file", new Blob([bytes]), fileName);
+    const res = await fetch("https://open.feishu.cn/open-apis/im/v1/files", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    const bodyText = await res.text();
+    let data: any = null;
+    try {
+      data = bodyText ? JSON.parse(bodyText) : null;
+    } catch {
+      data = null;
+    }
+    if (res.ok && data?.code === 0 && data?.data?.file_key) {
+      return String(data.data.file_key);
+    }
+    api.logger?.warn?.(
+      `[luckee] feishu im/files upload failed status=${res.status} body=${(bodyText || "").slice(0, 400)}`
+    );
+  } catch (err: any) {
+    api.logger?.warn?.(`[luckee] feishu im/files upload error: ${String(err?.message || err)}`);
+  }
+  return null;
+}
+
+async function feishuImReplyFileKey(
+  api: any,
+  token: string,
+  parentMessageId: string,
+  fileKey: string
+): Promise<boolean> {
+  try {
+    const res = await fetch(
+      `https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(
+        parentMessageId
+      )}/reply`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          msg_type: "file",
+          content: JSON.stringify({ file_key: fileKey }),
+        }),
+      }
+    );
+    const bodyText = await res.text();
+    let data: any = null;
+    try {
+      data = bodyText ? JSON.parse(bodyText) : null;
+    } catch {
+      data = null;
+    }
+    if (!res.ok || data?.code !== 0) {
+      api.logger?.warn?.(
+        `[luckee] feishu file reply failed status=${res.status} body=${(bodyText || "").slice(0, 400)}`
+      );
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    api.logger?.warn?.(`[luckee] feishu file reply error: ${String(err?.message || err)}`);
+    return false;
+  }
+}
+
+/** Upload each ``~/.luckee/.../generated_files/`` artifact as a Feishu chat file, in order. */
+async function uploadLuckeeCliArtifactsToFeishu(
+  api: any,
+  ctx: any,
+  parentMessageId: string | undefined,
+  rawCliOutput: string
+): Promise<void> {
+  const paths = collectLuckeeArtifactAbsolutePaths(rawCliOutput);
+  if (!paths.length) return;
+  const token = await getFeishuTenantToken(api);
+  if (!token) {
+    api.logger?.warn?.("[luckee] feishu artifact upload: missing tenant token");
+    return;
+  }
+  const parent = String(parentMessageId || "").trim();
+  if (!parent) {
+    api.logger?.warn?.("[luckee] feishu artifact upload: missing parent message id");
+    return;
+  }
+  for (const absPath of paths) {
+    try {
+      const st = await fs.stat(absPath);
+      if (!st.isFile()) {
+        api.logger?.warn?.(`[luckee] feishu artifact upload: not a file: ${absPath}`);
+        continue;
+      }
+      const bytes = await fs.readFile(absPath);
+      const fileName = path.basename(absPath) || "luckee-artifact.bin";
+      const fileKey = await feishuImUploadFileBytes(api, token, fileName, bytes);
+      if (!fileKey) continue;
+      const ok = await feishuImReplyFileKey(api, token, parent, fileKey);
+      api.logger?.info?.(
+        `[luckee] feishu artifact ${ok ? "sent" : "failed"}: ${fileName} (${bytes.length} B)`
+      );
+    } catch (err: any) {
+      api.logger?.warn?.(
+        `[luckee] feishu artifact upload error path=${absPath} err=${String(err?.message || err)}`
+      );
+    }
+  }
+}
+
 async function sendFeishuFullOutputFromTemp(
   api: any,
   ctx: any,
@@ -2040,8 +2239,11 @@ async function sendFeishuFullOutputFromTemp(
   options: FeishuCardOptions = {}
 ): Promise<{ ok: boolean; messageId?: string; tempPath?: string }> {
   const tempPath = createLuckeeTempOutputPath();
-  const normalized = normalizeWrappedUrls(
+  const stripped = stripLuckeeGeneratedFileLines(
     String(fullText || "").trim() || "(luckee completed with empty output)"
+  );
+  const normalized = normalizeWrappedUrls(
+    stripped || "(luckee completed with empty output)"
   );
 
   try {
@@ -2453,6 +2655,9 @@ async function executeLuckeeControlAction(
         progressMessageId = delivered.messageId;
         rememberActiveProgressMessageId(processKey, progressMessageId);
       }
+      const attachParent =
+        delivered.ok && delivered.messageId ? delivered.messageId : progressMessageId;
+      await uploadLuckeeCliArtifactsToFeishu(api, ctx, attachParent, output);
     } else {
       const edited = await sendProgressMessageEditable(api, ctx, finalText, progressMessageId, { title: controlTitle });
       if (edited.ok) {
@@ -2603,6 +2808,9 @@ function settleDetachedAuthWait(params: {
           setProgressMessageId(delivered.messageId);
           rememberActiveProgressMessageId(processKey, delivered.messageId);
         }
+        const attachParent =
+          delivered.ok && delivered.messageId ? delivered.messageId : getProgressMessageId();
+        await uploadLuckeeCliArtifactsToFeishu(api, ctx, attachParent, output);
       } else {
         await updateCard(
           withDoneFooter(renderLuckeeUserFacingText(output)),
@@ -2909,6 +3117,9 @@ async function executeLuckeeInteractive(
             progressMessageId = delivered.messageId;
             rememberActiveProgressMessageId(processKey, progressMessageId);
           }
+          const attachParent =
+            delivered.ok && delivered.messageId ? delivered.messageId : progressMessageId;
+          await uploadLuckeeCliArtifactsToFeishu(api, ctx, attachParent, output);
         } else {
           const finalText = withDoneFooter(
             renderLuckeeUserFacingText(output)
@@ -2955,22 +3166,217 @@ async function startLuckeeInteractiveDetached(
   api: any,
   params: any,
   ctx: any,
-  origin: "tool" | "command"
+  origin: "tool" | "command",
+  tmpAttachmentPaths?: string[],
 ): Promise<string> {
   const query = String(params?.query ?? "").trim();
-  void executeLuckeeInteractive(api, params, ctx, origin).catch(async (err: any) => {
-    const errMsg = String(err?.message || err || "");
-    const failText = `Luckee 查询失败: ${safePreview(errMsg, 200)}`;
-    api.logger?.error?.(
-      `[luckee] ${origin} detached failed: query="${safePreview(query)}" error=${safePreview(errMsg, 200)}`
-    );
+  void (async () => {
     try {
-      await sendProgressMessageEditable(api, ctx, failText, undefined, { title: safePreview(query, 60) });
-    } catch {
-      // Best effort only.
+      await executeLuckeeInteractive(api, params, ctx, origin);
+    } catch (err: any) {
+      const errMsg = String(err?.message || err || "");
+      const failText = `Luckee 查询失败: ${safePreview(errMsg, 200)}`;
+      api.logger?.error?.(
+        `[luckee] ${origin} detached failed: query="${safePreview(query)}" error=${safePreview(errMsg, 200)}`
+      );
+      try {
+        await sendProgressMessageEditable(api, ctx, failText, undefined, { title: safePreview(query, 60) });
+      } catch {
+        // Best effort only.
+      }
+    } finally {
+      if (tmpAttachmentPaths?.length) {
+        for (const p of tmpAttachmentPaths) {
+          await fs.unlink(p).catch(() => {});
+        }
+      }
     }
-  });
+  })();
   return buildDetachedLuckeeStartMessage(query);
+}
+
+// ── Attachment helpers ────────────────────────────────────────────────────────
+
+/**
+ * Extract an attachment ref from a Feishu message_received event.
+ * Feishu delivers file/image messages with file_key / image_key in the content.
+ */
+function extractFeishuAttachmentFromEvent(
+  event: any,
+  ctx: any,
+): AttachmentRef | null {
+  // The Feishu message_id is needed for the download API.
+  const messageId = String(
+    event.metadata?.messageId ||
+    event.metadata?.open_message_id ||
+    ctx.messageThreadId ||
+    event.metadata?.threadId ||
+    ""
+  ).trim();
+  if (!messageId) return null;
+
+  // Parse message content (may be a raw JSON string from Feishu).
+  const raw = event.content ?? event.metadata?.content ?? event.metadata?.rawContent;
+  let content: Record<string, any> = {};
+  if (raw) {
+    try {
+      content = typeof raw === "string" ? JSON.parse(raw) : (raw as Record<string, any>);
+    } catch {
+      return null;
+    }
+  }
+
+  if (content.file_key) {
+    return {
+      kind: "feishu_file",
+      messageId,
+      fileKey: String(content.file_key),
+      fileType: "file",
+      fileName: String(content.file_name || content.file_key || "attachment"),
+    };
+  }
+  if (content.image_key) {
+    return {
+      kind: "feishu_file",
+      messageId,
+      fileKey: String(content.image_key),
+      fileType: "image",
+      fileName: "image.png",
+    };
+  }
+
+  // Fallback: check event type field
+  const msgType = String(event.type || event.metadata?.messageType || "").toLowerCase();
+  if (msgType === "file" || msgType === "image" || msgType === "audio" || msgType === "video") {
+    const key = String(content.file_key || content.image_key || content.audio_key || content.video_key || "");
+    if (key) {
+      return {
+        kind: "feishu_file",
+        messageId,
+        fileKey: key,
+        fileType: msgType as AttachmentRef["fileType"],
+        fileName: String(content.file_name || key),
+      };
+    }
+  }
+
+  return null;
+}
+
+/** Extract generic URL-based attachments from event.attachments / event.files. */
+function extractGenericAttachmentsFromEvent(event: any): AttachmentRef[] {
+  const refs: AttachmentRef[] = [];
+  const list: any[] = event.attachments ?? event.files ?? [];
+  if (!Array.isArray(list)) return refs;
+  for (const att of list) {
+    const url = String(att?.url || att?.download_url || att?.link || "").trim();
+    const name = String(att?.name || att?.filename || att?.title || path.basename(url) || "attachment").trim();
+    if (url) refs.push({ kind: "url", url, fileName: name });
+  }
+  return refs;
+}
+
+async function downloadFeishuFileToTemp(
+  api: any,
+  messageId: string,
+  fileKey: string,
+  fileType: "file" | "image" | "audio" | "video",
+  fileName: string,
+): Promise<string> {
+  const token = await getFeishuTenantToken(api);
+  if (!token) throw new Error("Feishu tenant token unavailable for file download");
+
+  const resourceType = fileType === "image" ? "image" : "file";
+  const url =
+    `https://open.feishu.cn/open-apis/im/v1/messages/` +
+    `${encodeURIComponent(messageId)}/resources/${encodeURIComponent(fileKey)}` +
+    `?type=${resourceType}`;
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`Feishu file download HTTP ${res.status} key=${fileKey}`);
+  }
+
+  const safeBase = path.basename(fileName).replace(/[^\w.\-]/g, "_") || "attachment";
+  const tmpPath = path.join(
+    os.tmpdir(),
+    `luckee-attach-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${safeBase}`
+  );
+  await fs.writeFile(tmpPath, Buffer.from(await res.arrayBuffer()));
+  return tmpPath;
+}
+
+async function downloadUrlToTemp(url: string, fileName: string): Promise<string> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Attachment download HTTP ${res.status} from ${url}`);
+  const safeBase = path.basename(fileName).replace(/[^\w.\-]/g, "_") || "attachment";
+  const tmpPath = path.join(
+    os.tmpdir(),
+    `luckee-attach-${Date.now()}-${Math.random().toString(36).slice(2, 7)}-${safeBase}`
+  );
+  await fs.writeFile(tmpPath, Buffer.from(await res.arrayBuffer()));
+  return tmpPath;
+}
+
+/** Download all attachment refs to temp files; skips failed downloads with a warning. */
+async function downloadAttachmentRefs(
+  api: any,
+  refs: AttachmentRef[],
+  channelId: string,
+): Promise<string[]> {
+  const tmpPaths: string[] = [];
+  for (const ref of refs) {
+    try {
+      if (ref.kind === "feishu_file") {
+        const p = await downloadFeishuFileToTemp(api, ref.messageId, ref.fileKey, ref.fileType, ref.fileName);
+        tmpPaths.push(p);
+        api.logger?.info?.(`[luckee] downloaded feishu ${ref.fileType} key=${ref.fileKey} → ${p}`);
+      } else if (ref.kind === "url") {
+        const p = await downloadUrlToTemp(ref.url, ref.fileName);
+        tmpPaths.push(p);
+        api.logger?.info?.(`[luckee] downloaded url attachment → ${p}`);
+      }
+    } catch (err: any) {
+      api.logger?.warn?.(
+        `[luckee] attachment download failed (channel=${channelId}): ${String(err?.message || err)}`
+      );
+    }
+  }
+  return tmpPaths;
+}
+
+/**
+ * Collect all pending attachment refs for a sender: from the current event/ctx
+ * (same-message attachments) plus any previously cached refs from prior messages.
+ */
+function collectAttachmentRefs(
+  event: any,
+  ctx: any,
+  channelId: string,
+  senderKey: string,
+): AttachmentRef[] {
+  const refs: AttachmentRef[] = [];
+
+  // Same-message attachments from current event (if available)
+  if (event) {
+    if (channelId === "feishu") {
+      const feishuRef = extractFeishuAttachmentFromEvent(event, ctx);
+      if (feishuRef) refs.push(feishuRef);
+    }
+    refs.push(...extractGenericAttachmentsFromEvent(event));
+  }
+
+  // Also check ctx.attachments / ctx.files (some platforms pass these directly)
+  if (ctx) {
+    refs.push(...extractGenericAttachmentsFromEvent(ctx));
+  }
+
+  // Pop any attachments cached from prior messages in this conversation
+  refs.push(...popPendingAttachments(senderKey));
+
+  return refs;
 }
 
 export default function register(api: any) {
@@ -2981,6 +3387,19 @@ export default function register(api: any) {
         to: (event.metadata?.to as string) ?? undefined,
         threadId: (event.metadata?.threadId as string | number) ?? undefined,
       });
+
+      // Cache any file/image attachments so the next /luckee command can use them.
+      const channelId = String(ctx.channelId || "").trim();
+      const senderKey = `${channelId}|${ctx.accountId || ""}|${event.from || ""}`;
+      if (senderKey && channelId) {
+        if (channelId === "feishu") {
+          const ref = extractFeishuAttachmentFromEvent(event, ctx);
+          if (ref) pushPendingAttachment(senderKey, ref);
+        }
+        for (const ref of extractGenericAttachmentsFromEvent(event)) {
+          pushPendingAttachment(senderKey, ref);
+        }
+      }
     } catch {
       // best effort
     }
@@ -3045,6 +3464,10 @@ export default function register(api: any) {
         return result.usedPush ? {} : { text: result.output };
       }
 
+      // Resolve sender key for attachment lookup (pop-on-consume from pending cache)
+      const cmdChannelId = String(ctx.channelId || ctx.channel || "").trim();
+      const cmdSenderKey = `${cmdChannelId}|${ctx.accountId || ""}|${ctx.from || ctx.senderId || ""}`;
+
       if (parsed.action === "token") {
         const token = String(parsed.token || "").trim();
         if (!token) {
@@ -3056,19 +3479,57 @@ export default function register(api: any) {
           return { text: savedText };
         }
 
+        const tokenAttachRefs = collectAttachmentRefs(null, ctx, cmdChannelId, cmdSenderKey);
+        const tokenTmpPaths = await downloadAttachmentRefs(api, tokenAttachRefs, cmdChannelId);
+
         if (canPushLuckeeUpdates(ctx)) {
           const text = await startLuckeeInteractiveDetached(
             api,
-            { query: parsed.query },
+            { query: parsed.query, attachmentPaths: tokenTmpPaths },
             ctx,
-            "command"
+            "command",
+            tokenTmpPaths,
           );
           return { text };
         }
 
+        try {
+          const result = await executeLuckeeInteractive(
+            api,
+            { query: parsed.query, attachmentPaths: tokenTmpPaths },
+            ctx,
+            "command"
+          );
+          if (result.kind === "auth-pending") {
+            return { text: result.message };
+          }
+          if (result.kind === "stopped") {
+            return result.usedPush ? {} : { text: result.output };
+          }
+          return result.usedPush ? {} : { text: result.output };
+        } finally {
+          for (const p of tokenTmpPaths) { await fs.unlink(p).catch(() => {}); }
+        }
+      }
+
+      const attachRefs = collectAttachmentRefs(null, ctx, cmdChannelId, cmdSenderKey);
+      const tmpPaths = await downloadAttachmentRefs(api, attachRefs, cmdChannelId);
+
+      if (canPushLuckeeUpdates(ctx)) {
+        const text = await startLuckeeInteractiveDetached(
+          api,
+          { query: parsed.query, attachmentPaths: tmpPaths },
+          ctx,
+          "command",
+          tmpPaths,
+        );
+        return { text };
+      }
+
+      try {
         const result = await executeLuckeeInteractive(
           api,
-          { query: parsed.query },
+          { query: parsed.query, attachmentPaths: tmpPaths },
           ctx,
           "command"
         );
@@ -3079,31 +3540,9 @@ export default function register(api: any) {
           return result.usedPush ? {} : { text: result.output };
         }
         return result.usedPush ? {} : { text: result.output };
+      } finally {
+        for (const p of tmpPaths) { await fs.unlink(p).catch(() => {}); }
       }
-
-      if (canPushLuckeeUpdates(ctx)) {
-        const text = await startLuckeeInteractiveDetached(
-          api,
-          { query: parsed.query },
-          ctx,
-          "command"
-        );
-        return { text };
-      }
-
-      const result = await executeLuckeeInteractive(
-        api,
-        { query: parsed.query },
-        ctx,
-        "command"
-      );
-      if (result.kind === "auth-pending") {
-        return { text: result.message };
-      }
-      if (result.kind === "stopped") {
-        return result.usedPush ? {} : { text: result.output };
-      }
-      return result.usedPush ? {} : { text: result.output };
     },
   });
 
@@ -3121,8 +3560,17 @@ export default function register(api: any) {
       async execute(_id: string, params: any) {
         const effectiveCtx = channelCtx;
         const queryPreview = safePreview(String(params?.query ?? ""), 200);
+        const toolChannelId = String(effectiveCtx?.channelId || "").trim();
+        const toolSenderKey = `${toolChannelId}|${effectiveCtx?.accountId || ""}|${effectiveCtx?.from || ""}`;
+        const toolAttachRefs = collectAttachmentRefs(null, effectiveCtx, toolChannelId, toolSenderKey);
+        const toolTmpPaths = await downloadAttachmentRefs(api, toolAttachRefs, toolChannelId);
         try {
-          const result = await executeLuckeeInteractive(api, params, effectiveCtx, "tool");
+          const result = await executeLuckeeInteractive(
+            api,
+            { ...params, attachmentPaths: toolTmpPaths },
+            effectiveCtx,
+            "tool"
+          );
           const text =
             result.kind === "auth-pending" ? result.message : result.output;
           return result.kind === "auth-pending"
@@ -3135,6 +3583,8 @@ export default function register(api: any) {
           return luckeeToolReturnError(
             formatLuckeeQueryToolFailureMessage(err, queryPreview)
           );
+        } finally {
+          for (const p of toolTmpPaths) { await fs.unlink(p).catch(() => {}); }
         }
       },
     };
