@@ -1440,8 +1440,20 @@ function sanitizeFeishuCardText(text: string): string {
   return String(text || "").replace(/```/g, "``\\`");
 }
 
+/**
+ * Strip sequences that `ansi-to-pre` Terminal treats as vertical scroll/erase in ways
+ * that drop earlier lines from its virtual buffer (e.g. CSI `S` scroll-down, ESC `D`).
+ * Luckee stdout (often via `script` + Rich) can contain these; they are not meaningful for
+ * Feishu card text and previously made cards show only the tail (e.g. `Session: thread_id=…`).
+ */
+function stripVirtualTerminalBufferDestructors(text: string): string {
+  return String(text || "")
+    .replace(/\u001b\[[\d;?]*S/g, "")
+    .replace(/\u001bD/g, "");
+}
+
 function renderTerminalOutputText(text: string): string {
-  const raw = String(text || "");
+  const raw = stripVirtualTerminalBufferDestructors(String(text || ""));
   if (!raw.trim()) return "(empty output)";
   try {
     const terminal = new Terminal();
