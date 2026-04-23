@@ -18,10 +18,17 @@
     "plugin",
     "ai-tool"
   ],
+  "scripts": {
+    "feishu-card-dry-run": "tsx scripts/feishu-card-dry-run.ts"
+  },
   "dependencies": {
     "@sinclair/typebox": "^0.34.41",
     "ansi-to-pre": "^1.0.7",
     "strip-ansi": "^7.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "tsx": "^4.19.3"
   },
   "openclaw": {
     "extensions": [

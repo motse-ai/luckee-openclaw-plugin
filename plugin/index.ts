@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { Type } from "@sinclair/typebox";
-import { Terminal } from "ansi-to-pre";
 import stripAnsi from "strip-ansi";
 
 type LuckeeConfig = {
@@ -1441,36 +1440,28 @@ function sanitizeFeishuCardText(text: string): string {
 }
 
 /**
- * Strip sequences that `ansi-to-pre` Terminal treats as vertical scroll/erase in ways
- * that drop earlier lines from its virtual buffer (e.g. CSI `S` scroll-down, ESC `D`).
- * Luckee stdout (often via `script` + Rich) can contain these; they are not meaningful for
- * Feishu card text and previously made cards show only the tail (e.g. `Session: thread_id=…`).
+ * Turn captured CLI stdout/stderr into plain text for cards and progress mirrors.
+ *
+ * We intentionally do **not** use `ansi-to-pre` Terminal here: it emulates scroll/erase
+ * (CSI `S`, `J`, etc.) by mutating a virtual buffer, so real Luckee output (Rich + `script`)
+ * can shrink to a few lines or stay identical across many chunks. That makes
+ * `displayText === lastProgressDisplayText` in streaming Feishu updates and leaves the card
+ * stuck on the first "Still loading" frame, or drops everything except a tail line.
  */
-function stripVirtualTerminalBufferDestructors(text: string): string {
-  return String(text || "")
-    .replace(/\u001b\[[\d;?]*S/g, "")
-    .replace(/\u001bD/g, "");
-}
-
 function renderTerminalOutputText(text: string): string {
-  const raw = stripVirtualTerminalBufferDestructors(String(text || ""));
+  let raw = String(text || "");
   if (!raw.trim()) return "(empty output)";
-  try {
-    const terminal = new Terminal();
-    terminal.write(raw);
-    const rendered = stripAnsi(String(terminal.ansi || ""))
-      .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, "")
-      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-    return rendered || "(empty output)";
-  } catch {
-    const fallback = stripAnsi(raw)
-      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-    return fallback || "(empty output)";
-  }
+  raw = stripAnsi(raw)
+    // OSC (hyperlinks, titles) before any bare-ESC cleanup
+    .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\)/g, "")
+    // CSI: ESC [ ... final byte @–~ (ECMA-48)
+    .replace(/\u001b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]/g, "")
+    // C1 two-char forms that stripAnsi may leave (e.g. ESC D index / scroll in some emulators)
+    .replace(/\u001b[DM]/g, "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return raw || "(empty output)";
 }
 
 function renderLuckeeUserFacingText(text: string): string {
